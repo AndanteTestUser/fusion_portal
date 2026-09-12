@@ -31,10 +31,10 @@
         .btn.primary { background: #9b59b6; font-weight: bold; }
         .btn:active { transform: scale(0.95); }
         
-        /* APIキー入力欄のデザイン */
         .api-input {
             padding: 8px; border-radius: 4px; border: 1px solid #555;
             background: #1e1e1e; color: #fff; font-size: 12px; width: 140px;
+            flex-shrink: 0;
         }
 
         .canvas-container {
@@ -75,7 +75,6 @@
         <button id="btnRotLeft" class="btn">↺ 左5°</button>
         <button id="btnRotRight" class="btn">↻ 右5°</button>
         
-        <!-- APIキーを入力させるように変更 -->
         <input type="password" id="apiKeyInput" class="api-input" placeholder="Gemini APIキー">
         
         <button id="btnAI" class="btn primary">✨ AIでなじませる</button>
@@ -95,6 +94,7 @@
     <script>
         const canvas = document.getElementById('canvas');
         const ctx = canvas.getContext('2d');
+        const apiKeyInput = document.getElementById('apiKeyInput');
         
         let originalImage = null;
         let currentMode = 'lasso';
@@ -116,6 +116,24 @@
         const btnUndo = document.getElementById('btnUndo');
         const loadingOverlay = document.getElementById('loadingOverlay');
         
+        // ページ読み込み時に保存済みAPIキーを自動復元
+        window.addEventListener('DOMContentLoaded', () => {
+            const savedKey = localStorage.getItem('gemini_api_key');
+            if (savedKey) {
+                apiKeyInput.value = savedKey;
+            }
+        });
+
+        // キーが変更されたらローカルストレージを自動更新
+        apiKeyInput.addEventListener('change', () => {
+            const key = apiKeyInput.value.trim();
+            if (key) {
+                localStorage.setItem('gemini_api_key', key);
+            } else {
+                localStorage.removeItem('gemini_api_key');
+            }
+        });
+
         function showToast(msg) {
             const toast = document.getElementById('toast');
             toast.innerText = msg;
@@ -196,10 +214,7 @@
         }
 
         function handleStart(e) {
-            if (!originalImage) return;
-            // e.preventDefault(); // 一部ブラウザで入力欄へのフォーカスを妨げるため削除か調整を推奨
-            if (e.target.tagName.toLowerCase() === 'input') return; // input要素への操作を許可
-
+            if (!originalImage || e.target.tagName.toLowerCase() === 'input') return;
             const pos = getCanvasPos(e);
 
             if (currentMode === 'lasso') {
@@ -227,9 +242,7 @@
         }
 
         function handleMove(e) {
-            if (!originalImage) return;
-            if (e.target.tagName.toLowerCase() === 'input') return;
-
+            if (!originalImage || e.target.tagName.toLowerCase() === 'input') return;
             const pos = getCanvasPos(e);
 
             if (isDrawing && currentMode === 'lasso') {
@@ -306,7 +319,7 @@
                 targetCtx.lineTo(points[i].x, points[i].y);
             }
             targetCtx.closePath();
-            targetCtx.fillStyle = "white"; // 元の場所を白く塗りつぶす（または透明にするなどの処理）
+            targetCtx.fillStyle = "white";
             targetCtx.fill();
 
             const centerX = bounds.x + bounds.width / 2 + offset.x;
@@ -361,14 +374,15 @@
                 return;
             }
 
-            // 入力されたAPIキーを取得
-            const apiKey = document.getElementById('apiKeyInput').value.trim();
+            const apiKey = apiKeyInput.value.trim();
             if (!apiKey) {
                 showToast("Gemini APIキーを入力してください");
                 return;
             }
 
-            // AIに送信するためのクリーンな画像を生成（UIの枠線などを除外）
+            // 実行時にも最新のキーを記憶
+            localStorage.setItem('gemini_api_key', apiKey);
+
             const workCanvas = document.createElement('canvas');
             workCanvas.width = canvas.width;
             workCanvas.height = canvas.height;
@@ -388,8 +402,7 @@
             loadingOverlay.style.pointerEvents = 'auto';
 
             try {
-                // モデル名は利用可能なものに合わせて調整してください（例: gemini-1.5-pro 等）
-                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=${apiKey}`;
+                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
                 
                 const payload = {
                     contents: [{
@@ -403,27 +416,24 @@
                                 }
                             }
                         ]
-                    }],
-                    // 生成設定などで画像出力（Image Generation）がサポートされているエンドポイントか確認してください
+                    }]
                 };
 
-                let response = await fetch(apiUrl, {
+                const response = await fetch(apiUrl, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
                 });
 
                 if (!response.ok) {
-                    throw new Error("APIリクエスト失敗: " + response.statusText);
+                    throw new Error("API request failed: " + response.statusText);
                 }
 
                 const result = await response.json();
-                
-                // ※注: Gemini APIのレスポンス形式が画像生成の場合、実際のレスポンス構造に合わせてパースを調整してください
                 const part = result?.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
                 
                 if (!part) {
-                    throw new Error("APIから画像が返されませんでした");
+                    throw new Error("APIから画像レスポンスを取得できませんでした");
                 }
 
                 const imageUrl = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
@@ -444,18 +454,17 @@
                 console.error(error);
                 loadingOverlay.style.opacity = '0';
                 loadingOverlay.style.pointerEvents = 'none';
-                showToast("AI処理に失敗しました。APIキーやモデルの権限を確認してください。");
+                showToast("AI処理に失敗しました。APIキーや通信状態を確認してください。");
             }
         };
 
-        // バグ修正済みの保存処理
+        // 画像保存処理
         document.getElementById('btnSave').onclick = () => {
             if (!originalImage) {
                 showToast("保存する画像がありません");
                 return;
             }
             
-            // 枠線やUIを除外したクリーンなキャンバスを作成
             const saveCanvas = document.createElement('canvas');
             saveCanvas.width = canvas.width;
             saveCanvas.height = canvas.height;
@@ -467,7 +476,7 @@
                 drawPiece(sCtx, edit.lassoPoints, edit.cutPieceCanvas, edit.cutPieceBounds, edit.dragOffset, edit.cutPieceRotation, false);
             });
             if (hasSelection) {
-                drawPiece(sCtx, lassoPoints, cutPieceCanvas, cutPieceBounds, dragOffset, cutPieceRotation, false); // falseで青枠を非表示
+                drawPiece(sCtx, lassoPoints, cutPieceCanvas, cutPieceBounds, dragOffset, cutPieceRotation, false);
             }
             
             saveCanvas.toBlob((blob) => {
