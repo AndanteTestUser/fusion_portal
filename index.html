@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>AI Image Editor with Gemini API</title>
+    <title>AI Image Editor</title>
     <style>
         body {
             margin: 0; padding: 0;
@@ -13,28 +13,29 @@
             display: flex; flex-direction: column;
             height: 100vh;
         }
+        
+        /* ツールバーの改善：折り返し許可、余白調整 */
         .toolbar {
-            display: flex; gap: 8px; padding: 10px;
+            display: flex; gap: 6px; padding: 8px;
             background: #2c2c2c; align-items: center;
-            overflow-x: auto; flex-shrink: 0;
+            flex-wrap: wrap; /* 横幅が足りない場合は改行 */
             box-shadow: 0 2px 10px rgba(0,0,0,0.5);
             z-index: 10;
         }
         .btn {
-            padding: 10px 14px; border: none; border-radius: 6px;
+            padding: 8px 10px; border: none; border-radius: 6px;
             background: #444; color: white; cursor: pointer;
-            font-size: 14px; white-space: nowrap;
+            font-size: 13px; font-weight: bold; white-space: nowrap;
             transition: all 0.2s;
         }
         .btn.active { background: #3498db; box-shadow: inset 0 0 5px rgba(0,0,0,0.3); }
         .btn.action { background: #e67e22; }
-        .btn.primary { background: #9b59b6; font-weight: bold; }
+        .btn.primary { background: #9b59b6; }
         .btn:active { transform: scale(0.95); }
         
         .api-input {
             padding: 8px; border-radius: 4px; border: 1px solid #555;
-            background: #1e1e1e; color: #fff; font-size: 12px; width: 140px;
-            flex-shrink: 0;
+            background: #1e1e1e; color: #fff; font-size: 12px; width: 80px;
         }
 
         .canvas-container {
@@ -46,6 +47,39 @@
             object-fit: contain;
             touch-action: none;
         }
+
+        /* 比較ダイアログのデザイン */
+        .modal {
+            display: none; position: fixed; inset: 0;
+            background: rgba(0,0,0,0.85); z-index: 3000;
+            justify-content: center; align-items: center;
+            padding: 20px; overflow-y: auto;
+        }
+        .modal-content {
+            background: #1e1e1e; border-radius: 12px; padding: 20px;
+            width: 100%; max-width: 900px; position: relative;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+        }
+        .close-btn {
+            position: absolute; top: 10px; right: 20px;
+            font-size: 28px; cursor: pointer; color: #aaa;
+        }
+        .close-btn:hover { color: #fff; }
+        .compare-grid {
+            display: flex; gap: 15px; margin-top: 15px;
+            flex-wrap: wrap; justify-content: center;
+        }
+        .compare-item {
+            flex: 1; min-width: 200px;
+            background: #2a2a2a; padding: 10px; border-radius: 8px;
+            display: flex; flex-direction: column; align-items: center; gap: 10px;
+        }
+        .compare-item h3 { margin: 0; font-size: 14px; color: #ccc; }
+        .compare-item img {
+            width: 100%; height: 180px; object-fit: contain;
+            background: #000; border-radius: 4px;
+        }
+        
         #toast {
             position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%);
             background: rgba(0,0,0,0.85); color: #fff;
@@ -58,9 +92,9 @@
             z-index: 2000; opacity: 0; pointer-events: none; transition: opacity 0.3s;
         }
         .spinner {
-            width: 50px; height: 50px; border: 5px solid #ccc;
-            border-top: 5px solid #3498db; border-radius: 50%;
-            animation: spin 1s linear infinite; margin-bottom: 15px;
+            width: 40px; height: 40px; border: 4px solid #ccc;
+            border-top: 4px solid #3498db; border-radius: 50%;
+            animation: spin 1s linear infinite; margin-bottom: 10px;
         }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
     </style>
@@ -68,17 +102,19 @@
 <body>
     <div class="toolbar">
         <input type="file" id="fileInput" accept="image/*" style="display: none;">
-        <button class="btn" onclick="document.getElementById('fileInput').click()">📁 開く</button>
-        <button id="btnLasso" class="btn active">🖍️ なぞって切り取り</button>
-        <button id="btnMove" class="btn">🖐️ 移動・回転</button>
-        <button id="btnUndo" class="btn action">↩️ やり直す</button>
-        <button id="btnRotLeft" class="btn">↺ 左5°</button>
-        <button id="btnRotRight" class="btn">↻ 右5°</button>
+        <!-- UIの文言を最小限に最適化 -->
+        <button class="btn" onclick="document.getElementById('fileInput').click()">📁 読込</button>
+        <button id="btnLasso" class="btn active">🖍️ 選択</button>
+        <button id="btnMove" class="btn">🖐️ 移動</button>
+        <button id="btnUndo" class="btn action">↩️ 取消</button>
+        <button id="btnRotLeft" class="btn">↺</button>
+        <button id="btnRotRight" class="btn">↻</button>
+        <input type="password" id="apiKeyInput" class="api-input" placeholder="APIキー">
+        <button id="btnAI" class="btn primary">✨ AI実行</button>
         
-        <input type="password" id="apiKeyInput" class="api-input" placeholder="Gemini APIキー">
-        
-        <button id="btnAI" class="btn primary">✨ AIでなじませる</button>
-        <button id="btnSave" class="btn" style="background: #27ae60; font-weight: bold;">💾 保存</button>
+        <!-- 新機能：比較ダイアログ呼び出しボタン -->
+        <button id="btnCompare" class="btn" style="background: #34495e;">🖼️ 比較</button>
+        <button id="btnSave" class="btn" style="background: #27ae60;">💾 保存</button>
     </div>
     
     <div class="canvas-container">
@@ -88,7 +124,32 @@
     
     <div id="loadingOverlay">
         <div class="spinner"></div>
-        <div id="loadingText" style="font-size: 16px; font-weight: bold;">Gemini AIが画像をなじませています...</div>
+        <div id="loadingText" style="font-size: 14px; font-weight: bold;">処理中...</div>
+    </div>
+
+    <!-- 比較ダイアログ -->
+    <div id="compareModal" class="modal">
+        <div class="modal-content">
+            <span class="close-btn" id="closeModal">&times;</span>
+            <h2 style="margin-top:0; font-size:18px;">生成履歴の比較</h2>
+            <div class="compare-grid">
+                <div class="compare-item">
+                    <h3>① 元画像</h3>
+                    <img id="imgOriginal" src="" alt="未設定">
+                    <button class="btn action" onclick="downloadDataUrl(historyOriginal, '1_original.png')">⬇️ DL</button>
+                </div>
+                <div class="compare-item">
+                    <h3>② 編集状態 (AI実行前)</h3>
+                    <img id="imgEdited" src="" alt="未設定">
+                    <button class="btn action" onclick="downloadDataUrl(historyEdited, '2_edited.png')">⬇️ DL</button>
+                </div>
+                <div class="compare-item">
+                    <h3>③ AI生成結果</h3>
+                    <img id="imgGenerated" src="" alt="未設定">
+                    <button class="btn action" onclick="downloadDataUrl(historyGenerated, '3_generated.png')">⬇️ DL</button>
+                </div>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -111,26 +172,25 @@
         let isDragging = false;
         let lastX, lastY;
 
+        // 比較用の画像データを保持する変数
+        let historyOriginal = null;
+        let historyEdited = null;
+        let historyGenerated = null;
+
         const btnLasso = document.getElementById('btnLasso');
         const btnMove = document.getElementById('btnMove');
         const btnUndo = document.getElementById('btnUndo');
         const loadingOverlay = document.getElementById('loadingOverlay');
         
-        // 保存済みAPIキーの復元
         window.addEventListener('DOMContentLoaded', () => {
             const savedKey = localStorage.getItem('gemini_api_key');
-            if (savedKey) {
-                apiKeyInput.value = savedKey;
-            }
+            if (savedKey) apiKeyInput.value = savedKey;
         });
 
         apiKeyInput.addEventListener('change', () => {
             const key = apiKeyInput.value.trim();
-            if (key) {
-                localStorage.setItem('gemini_api_key', key);
-            } else {
-                localStorage.removeItem('gemini_api_key');
-            }
+            if (key) localStorage.setItem('gemini_api_key', key);
+            else localStorage.removeItem('gemini_api_key');
         });
 
         function showToast(msg) {
@@ -165,7 +225,13 @@
                     originalImage = img;
                     pastEdits = [];
                     resetCurrentSelection();
-                    showToast("画像を読み込みました。対象をなぞってください。");
+                    
+                    // 履歴リセット＆元画像を記録
+                    historyOriginal = event.target.result;
+                    historyEdited = null;
+                    historyGenerated = null;
+                    
+                    showToast("画像を読み込みました");
                 };
                 img.src = event.target.result;
             };
@@ -187,11 +253,9 @@
             if (!originalImage) return;
             if (hasSelection || isDrawing || lassoPoints.length > 0) {
                 resetCurrentSelection();
-                showToast("選択をキャンセルしました");
             } else if (pastEdits.length > 0) {
                 pastEdits.pop();
                 resetCurrentSelection();
-                showToast("1つ前の編集を取り消しました");
             }
         };
 
@@ -202,14 +266,9 @@
             const rect = canvas.getBoundingClientRect();
             const clientX = e.clientX || (e.touches && e.touches[0].clientX);
             const clientY = e.clientY || (e.touches && e.touches[0].clientY);
-            
             const scaleX = canvas.width / rect.width;
             const scaleY = canvas.height / rect.height;
-            
-            return {
-                x: (clientX - rect.left) * scaleX,
-                y: (clientY - rect.top) * scaleY
-            };
+            return { x: (clientX - rect.left) * scaleX, y: (clientY - rect.top) * scaleY };
         }
 
         function handleStart(e) {
@@ -219,24 +278,17 @@
             if (currentMode === 'lasso') {
                 if (hasSelection && lassoPoints.length > 0) {
                     pastEdits.push({
-                        lassoPoints: [...lassoPoints],
-                        cutPieceCanvas: cutPieceCanvas,
-                        cutPieceBounds: {...cutPieceBounds},
-                        cutPieceRotation: cutPieceRotation,
-                        dragOffset: {...dragOffset}
+                        lassoPoints: [...lassoPoints], cutPieceCanvas: cutPieceCanvas,
+                        cutPieceBounds: {...cutPieceBounds}, cutPieceRotation: cutPieceRotation, dragOffset: {...dragOffset}
                     });
                 }
                 lassoPoints = [pos];
                 isDrawing = true;
                 hasSelection = false;
-                cutPieceCanvas = null;
-                cutPieceBounds = null;
-                cutPieceRotation = 0;
-                dragOffset = { x: 0, y: 0 };
+                cutPieceCanvas = null; cutPieceBounds = null; cutPieceRotation = 0; dragOffset = { x: 0, y: 0 };
             } else if (currentMode === 'move' && hasSelection) {
                 isDragging = true;
-                lastX = pos.x;
-                lastY = pos.y;
+                lastX = pos.x; lastY = pos.y;
             }
         }
 
@@ -250,21 +302,18 @@
             } else if (isDragging && currentMode === 'move' && hasSelection) {
                 dragOffset.x += (pos.x - lastX);
                 dragOffset.y += (pos.y - lastY);
-                lastX = pos.x;
-                lastY = pos.y;
+                lastX = pos.x; lastY = pos.y;
                 renderCanvas();
             }
         }
 
         function handleEnd(e) {
             if (!originalImage) return;
-            
             if (isDrawing) {
                 isDrawing = false;
                 if (lassoPoints.length > 5) {
                     createCutPiece();
                     hasSelection = true;
-                    showToast("切り取りました。「🖐️ 移動・回転」で配置してください。");
                     setMode('move');
                 } else {
                     resetCurrentSelection();
@@ -279,7 +328,6 @@
         canvas.addEventListener('mousemove', handleMove, { passive: false });
         canvas.addEventListener('mouseup', handleEnd, { passive: false });
         canvas.addEventListener('mouseleave', handleEnd, { passive: false });
-        
         canvas.addEventListener('touchstart', handleStart, { passive: false });
         canvas.addEventListener('touchmove', handleMove, { passive: false });
         canvas.addEventListener('touchend', handleEnd, { passive: false });
@@ -300,9 +348,7 @@
 
             pCtx.beginPath();
             pCtx.moveTo(lassoPoints[0].x, lassoPoints[0].y);
-            for (let i = 1; i < lassoPoints.length; i++) {
-                pCtx.lineTo(lassoPoints[i].x, lassoPoints[i].y);
-            }
+            for (let i = 1; i < lassoPoints.length; i++) pCtx.lineTo(lassoPoints[i].x, lassoPoints[i].y);
             pCtx.closePath();
             pCtx.clip();
             pCtx.drawImage(originalImage, 0, 0);
@@ -314,9 +360,7 @@
             targetCtx.save();
             targetCtx.beginPath();
             targetCtx.moveTo(points[0].x, points[0].y);
-            for (let i = 1; i < points.length; i++) {
-                targetCtx.lineTo(points[i].x, points[i].y);
-            }
+            for (let i = 1; i < points.length; i++) targetCtx.lineTo(points[i].x, points[i].y);
             targetCtx.closePath();
             targetCtx.fillStyle = "white";
             targetCtx.fill();
@@ -342,83 +386,58 @@
             if (!originalImage) return;
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             ctx.drawImage(originalImage, 0, 0);
-
-            pastEdits.forEach(edit => {
-                drawPiece(ctx, edit.lassoPoints, edit.cutPieceCanvas, edit.cutPieceBounds, edit.dragOffset, edit.cutPieceRotation, false);
-            });
-
-            if (hasSelection && cutPieceCanvas) {
-                drawPiece(ctx, lassoPoints, cutPieceCanvas, cutPieceBounds, dragOffset, cutPieceRotation, true);
-            }
-
+            pastEdits.forEach(edit => drawPiece(ctx, edit.lassoPoints, edit.cutPieceCanvas, edit.cutPieceBounds, edit.dragOffset, edit.cutPieceRotation, false));
+            if (hasSelection && cutPieceCanvas) drawPiece(ctx, lassoPoints, cutPieceCanvas, cutPieceBounds, dragOffset, cutPieceRotation, true);
+            
             if (isDrawing && lassoPoints.length > 0) {
                 ctx.save();
                 ctx.beginPath();
                 ctx.moveTo(lassoPoints[0].x, lassoPoints[0].y);
-                for (let i = 1; i < lassoPoints.length; i++) {
-                    ctx.lineTo(lassoPoints[i].x, lassoPoints[i].y);
-                }
-                ctx.strokeStyle = "red";
-                ctx.lineWidth = 3;
-                ctx.setLineDash([5, 5]);
-                ctx.stroke();
+                for (let i = 1; i < lassoPoints.length; i++) ctx.lineTo(lassoPoints[i].x, lassoPoints[i].y);
+                ctx.strokeStyle = "red"; ctx.lineWidth = 3; ctx.setLineDash([5, 5]); ctx.stroke();
                 ctx.restore();
             }
         }
 
-        // --- Gemini API による自動修復処理 ---
-        document.getElementById('btnAI').onclick = async () => {
-            if (!originalImage) {
-                showToast("画像が読み込まれていません");
-                return;
-            }
+        // 赤点線や青枠を排除した「クリーンな画像」を生成する関数
+        function getCleanCanvasDataURL() {
+            const cCanvas = document.createElement('canvas');
+            cCanvas.width = canvas.width;
+            cCanvas.height = canvas.height;
+            const cCtx = cCanvas.getContext('2d');
+            cCtx.drawImage(originalImage, 0, 0);
+            pastEdits.forEach(edit => drawPiece(cCtx, edit.lassoPoints, edit.cutPieceCanvas, edit.cutPieceBounds, edit.dragOffset, edit.cutPieceRotation, false));
+            if (hasSelection) drawPiece(cCtx, lassoPoints, cutPieceCanvas, cutPieceBounds, dragOffset, cutPieceRotation, false);
+            return cCanvas.toDataURL('image/jpeg', 0.95);
+        }
 
+        // --- Gemini API 処理 ---
+        document.getElementById('btnAI').onclick = async () => {
+            if (!originalImage) return showToast("画像がありません");
+            
             const apiKey = apiKeyInput.value.trim();
-            if (!apiKey) {
-                showToast("Gemini APIキーを入力してください");
-                return;
-            }
+            if (!apiKey) return showToast("APIキーを入力してください");
             localStorage.setItem('gemini_api_key', apiKey);
 
-            const workCanvas = document.createElement('canvas');
-            workCanvas.width = canvas.width;
-            workCanvas.height = canvas.height;
-            const wCtx = workCanvas.getContext('2d');
-            wCtx.drawImage(originalImage, 0, 0);
-            
-            pastEdits.forEach(edit => {
-                drawPiece(wCtx, edit.lassoPoints, edit.cutPieceCanvas, edit.cutPieceBounds, edit.dragOffset, edit.cutPieceRotation, false);
-            });
-            if (hasSelection) {
-                drawPiece(wCtx, lassoPoints, cutPieceCanvas, cutPieceBounds, dragOffset, cutPieceRotation, false);
-            }
-
-            const base64Data = workCanvas.toDataURL('image/jpeg', 0.9).split(',')[1];
+            // API送信直前の状態（編集状態）を履歴として記録
+            const dataUrl = getCleanCanvasDataURL();
+            historyEdited = dataUrl;
+            const base64Data = dataUrl.split(',')[1];
             
             loadingOverlay.style.opacity = '1';
             loadingOverlay.style.pointerEvents = 'auto';
 
             try {
-                // ★元の正しいモデル名に復旧しました
                 const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image:generateContent?key=${apiKey}`;
-                
                 const payload = {
                     contents: [{
                         role: "user",
                         parts: [
                             { text: "This is an edited collage image where a body part was repositioned, leaving some awkward gaps or white spots. Please perform inpainting/blending: seamlessly blend the moved part with the surrounding body, clothes, and background, remove any awkward seams or gaps, and make it look like a naturally drawn, flawless illustration without altering the overall character design or composition." },
-                            {
-                                inlineData: {
-                                    mimeType: "image/jpeg",
-                                    data: base64Data
-                                }
-                            }
+                            { inlineData: { mimeType: "image/jpeg", data: base64Data } }
                         ]
                     }],
-                    // ★勝手に削除してしまっていた「画像で出力する」設定を復元しました
-                    generationConfig: {
-                        responseModalities: ['IMAGE']
-                    }
+                    generationConfig: { responseModalities: ['IMAGE'] }
                 };
 
                 let response;
@@ -426,85 +445,67 @@
                 let delay = 1000;
 
                 for (let i = 0; i < retries; i++) {
-                    response = await fetch(apiUrl, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(payload)
-                    });
+                    response = await fetch(apiUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
                     if (response.ok) break;
                     await new Promise(res => setTimeout(res, delay));
                     delay *= 2;
                 }
 
-                if (!response || !response.ok) {
-                    throw new Error("API request failed: " + response.statusText);
-                }
+                if (!response || !response.ok) throw new Error("API通信エラー");
 
                 const result = await response.json();
                 const part = result?.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
-                
-                if (!part) {
-                    throw new Error("No image returned from Gemini API");
-                }
+                if (!part) throw new Error("画像が返されませんでした");
 
                 const imageUrl = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+                
+                // AI生成結果を履歴として記録
+                historyGenerated = imageUrl;
+
                 const finalImg = new Image();
                 finalImg.onload = () => {
-                    canvas.width = finalImg.width;
-                    canvas.height = finalImg.height;
-                    originalImage = finalImg;
-                    pastEdits = [];
-                    resetCurrentSelection();
-                    loadingOverlay.style.opacity = '0';
-                    loadingOverlay.style.pointerEvents = 'none';
-                    showToast("✨ Gemini AIによるなじませ処理が完了しました！");
+                    canvas.width = finalImg.width; canvas.height = finalImg.height;
+                    originalImage = finalImg; pastEdits = []; resetCurrentSelection();
+                    loadingOverlay.style.opacity = '0'; loadingOverlay.style.pointerEvents = 'none';
+                    showToast("✨ 完了しました");
                 };
                 finalImg.src = imageUrl;
-
             } catch (error) {
-                console.error(error);
-                loadingOverlay.style.opacity = '0';
-                loadingOverlay.style.pointerEvents = 'none';
-                showToast("AI処理に失敗しました。APIキーや通信状態を確認してください。");
+                loadingOverlay.style.opacity = '0'; loadingOverlay.style.pointerEvents = 'none';
+                showToast("AI処理に失敗しました");
             }
         };
 
-        // 画像保存処理
+        // --- 比較ダイアログの制御 ---
+        const modal = document.getElementById('compareModal');
+        document.getElementById('btnCompare').onclick = () => {
+            if (!originalImage) return showToast("画像が読み込まれていません");
+            // srcがnullの場合は空文字を設定
+            document.getElementById('imgOriginal').src = historyOriginal || '';
+            document.getElementById('imgEdited').src = historyEdited || '';
+            document.getElementById('imgGenerated').src = historyGenerated || '';
+            modal.style.display = 'flex';
+        };
+        
+        document.getElementById('closeModal').onclick = () => {
+            modal.style.display = 'none';
+        };
+
+        // ダウンロード補助関数
+        function downloadDataUrl(dataUrl, filename) {
+            if (!dataUrl) return showToast("この画像はまだ生成されていません");
+            const link = document.createElement('a');
+            link.download = filename;
+            link.href = dataUrl;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+
+        // ツールバーの保存ボタン（現在のキャンバスの状態を保存）
         document.getElementById('btnSave').onclick = () => {
-            if (!originalImage) {
-                showToast("保存する画像がありません");
-                return;
-            }
-            
-            const saveCanvas = document.createElement('canvas');
-            saveCanvas.width = canvas.width;
-            saveCanvas.height = canvas.height;
-            const sCtx = saveCanvas.getContext('2d');
-            
-            sCtx.drawImage(originalImage, 0, 0);
-            
-            pastEdits.forEach(edit => {
-                drawPiece(sCtx, edit.lassoPoints, edit.cutPieceCanvas, edit.cutPieceBounds, edit.dragOffset, edit.cutPieceRotation, false);
-            });
-            if (hasSelection) {
-                drawPiece(sCtx, lassoPoints, cutPieceCanvas, cutPieceBounds, dragOffset, cutPieceRotation, false);
-            }
-            
-            saveCanvas.toBlob((blob) => {
-                if (!blob) {
-                    showToast("画像の保存に失敗しました");
-                    return;
-                }
-                const url = URL.createObjectURL(blob);
-                const link = document.createElement('a');
-                link.download = 'gemini_edited_image.png';
-                link.href = url;
-                document.body.appendChild(link);
-                link.click();
-                document.body.removeChild(link);
-                URL.revokeObjectURL(url);
-                showToast("画像をダウンロードしました！");
-            }, 'image/png');
+            if (!originalImage) return showToast("保存する画像がありません");
+            downloadDataUrl(getCleanCanvasDataURL(), 'current_edited_image.png');
         };
     </script>
 </body>
