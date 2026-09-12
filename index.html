@@ -12,26 +12,57 @@
             overflow: hidden;
             display: flex; flex-direction: column;
             height: 100vh;
+            /* 👇 画面の長押しやドラッグによる意図しないテキスト選択（青いハイライト）を防止 */
+            -webkit-user-select: none;
+            -moz-user-select: none;
+            -ms-user-select: none;
+            user-select: none;
+            -webkit-touch-callout: none;
         }
         
-        /* ツールバーの改善：折り返し許可、余白調整 */
         .toolbar {
-            display: flex; gap: 6px; padding: 8px;
+            display: flex; gap: 8px; padding: 8px;
             background: #2c2c2c; align-items: center;
-            flex-wrap: wrap; /* 横幅が足りない場合は改行 */
+            flex-wrap: wrap;
             box-shadow: 0 2px 10px rgba(0,0,0,0.5);
             z-index: 10;
         }
+
+        /* 共通ボタンデザインをシンプルに統一 */
         .btn {
-            padding: 8px 10px; border: none; border-radius: 6px;
+            padding: 8px 12px; border: 1px solid #555; border-radius: 6px;
             background: #444; color: white; cursor: pointer;
-            font-size: 13px; font-weight: bold; white-space: nowrap;
+            font-size: 13px; white-space: nowrap;
             transition: all 0.2s;
         }
-        .btn.active { background: #3498db; box-shadow: inset 0 0 5px rgba(0,0,0,0.3); }
-        .btn.action { background: #e67e22; }
-        .btn.primary { background: #9b59b6; }
+        .btn:hover { background: #555; }
         .btn:active { transform: scale(0.95); }
+        
+        /* 👇 選択・移動のトグルボタングループ */
+        .toggle-group {
+            display: flex;
+            border-radius: 6px;
+            overflow: hidden;
+            border: 1px solid #555;
+        }
+        .toggle-group .btn {
+            border: none;
+            border-radius: 0;
+            border-right: 1px solid #333;
+            margin: 0;
+        }
+        .toggle-group .btn:last-child {
+            border-right: none;
+        }
+        .toggle-group .btn.active {
+            background: #3498db; /* 選択中のみ青色 */
+            font-weight: bold;
+            box-shadow: inset 0 2px 5px rgba(0,0,0,0.3);
+        }
+
+        /* AI実行ボタンのみアクセントカラー */
+        .btn-ai { background: #9b59b6; border-color: #8e44ad; font-weight: bold; }
+        .btn-ai:hover { background: #8e44ad; }
         
         .api-input {
             padding: 8px; border-radius: 4px; border: 1px solid #555;
@@ -45,7 +76,7 @@
         canvas {
             max-width: 100%; max-height: 100%;
             object-fit: contain;
-            touch-action: none;
+            touch-action: none; /* スクロール防止 */
         }
 
         /* 比較ダイアログのデザイン */
@@ -102,19 +133,25 @@
 <body>
     <div class="toolbar">
         <input type="file" id="fileInput" accept="image/*" style="display: none;">
-        <!-- UIの文言を最小限に最適化 -->
         <button class="btn" onclick="document.getElementById('fileInput').click()">📁 読込</button>
-        <button id="btnLasso" class="btn active">🖍️ 選択</button>
-        <button id="btnMove" class="btn">🖐️ 移動</button>
-        <button id="btnUndo" class="btn action">↩️ 取消</button>
+        
+        <!-- UI改善：選択と移動を連結したトグルボタンに変更 -->
+        <div class="toggle-group">
+            <button id="btnLasso" class="btn active">🖍️ 選択</button>
+            <button id="btnMove" class="btn">🖐️ 移動</button>
+        </div>
+        
+        <!-- 色を統一してシンプルに -->
+        <button id="btnUndo" class="btn">↩️ 取消</button>
         <button id="btnRotLeft" class="btn">↺</button>
         <button id="btnRotRight" class="btn">↻</button>
-        <input type="password" id="apiKeyInput" class="api-input" placeholder="APIキー">
-        <button id="btnAI" class="btn primary">✨ AI実行</button>
         
-        <!-- 新機能：比較ダイアログ呼び出しボタン -->
-        <button id="btnCompare" class="btn" style="background: #34495e;">🖼️ 比較</button>
-        <button id="btnSave" class="btn" style="background: #27ae60;">💾 保存</button>
+        <input type="password" id="apiKeyInput" class="api-input" placeholder="APIキー">
+        
+        <button id="btnAI" class="btn btn-ai">✨ AI実行</button>
+        
+        <button id="btnCompare" class="btn">🖼️ 比較</button>
+        <button id="btnSave" class="btn">💾 保存</button>
     </div>
     
     <div class="canvas-container">
@@ -136,17 +173,17 @@
                 <div class="compare-item">
                     <h3>① 元画像</h3>
                     <img id="imgOriginal" src="" alt="未設定">
-                    <button class="btn action" onclick="downloadDataUrl(historyOriginal, '1_original.png')">⬇️ DL</button>
+                    <button class="btn" onclick="downloadDataUrl(historyOriginal, '1_original.png')">⬇️ DL</button>
                 </div>
                 <div class="compare-item">
                     <h3>② 編集状態 (AI実行前)</h3>
                     <img id="imgEdited" src="" alt="未設定">
-                    <button class="btn action" onclick="downloadDataUrl(historyEdited, '2_edited.png')">⬇️ DL</button>
+                    <button class="btn" onclick="downloadDataUrl(historyEdited, '2_edited.png')">⬇️ DL</button>
                 </div>
                 <div class="compare-item">
                     <h3>③ AI生成結果</h3>
                     <img id="imgGenerated" src="" alt="未設定">
-                    <button class="btn action" onclick="downloadDataUrl(historyGenerated, '3_generated.png')">⬇️ DL</button>
+                    <button class="btn" onclick="downloadDataUrl(historyGenerated, '3_generated.png')">⬇️ DL</button>
                 </div>
             </div>
         </div>
@@ -172,7 +209,6 @@
         let isDragging = false;
         let lastX, lastY;
 
-        // 比較用の画像データを保持する変数
         let historyOriginal = null;
         let historyEdited = null;
         let historyGenerated = null;
@@ -226,7 +262,6 @@
                     pastEdits = [];
                     resetCurrentSelection();
                     
-                    // 履歴リセット＆元画像を記録
                     historyOriginal = event.target.result;
                     historyEdited = null;
                     historyGenerated = null;
@@ -399,7 +434,6 @@
             }
         }
 
-        // 赤点線や青枠を排除した「クリーンな画像」を生成する関数
         function getCleanCanvasDataURL() {
             const cCanvas = document.createElement('canvas');
             cCanvas.width = canvas.width;
@@ -419,7 +453,6 @@
             if (!apiKey) return showToast("APIキーを入力してください");
             localStorage.setItem('gemini_api_key', apiKey);
 
-            // API送信直前の状態（編集状態）を履歴として記録
             const dataUrl = getCleanCanvasDataURL();
             historyEdited = dataUrl;
             const base64Data = dataUrl.split(',')[1];
@@ -458,8 +491,6 @@
                 if (!part) throw new Error("画像が返されませんでした");
 
                 const imageUrl = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
-                
-                // AI生成結果を履歴として記録
                 historyGenerated = imageUrl;
 
                 const finalImg = new Image();
@@ -480,7 +511,6 @@
         const modal = document.getElementById('compareModal');
         document.getElementById('btnCompare').onclick = () => {
             if (!originalImage) return showToast("画像が読み込まれていません");
-            // srcがnullの場合は空文字を設定
             document.getElementById('imgOriginal').src = historyOriginal || '';
             document.getElementById('imgEdited').src = historyEdited || '';
             document.getElementById('imgGenerated').src = historyGenerated || '';
@@ -491,7 +521,6 @@
             modal.style.display = 'none';
         };
 
-        // ダウンロード補助関数
         function downloadDataUrl(dataUrl, filename) {
             if (!dataUrl) return showToast("この画像はまだ生成されていません");
             const link = document.createElement('a');
@@ -502,7 +531,6 @@
             document.body.removeChild(link);
         }
 
-        // ツールバーの保存ボタン（現在のキャンバスの状態を保存）
         document.getElementById('btnSave').onclick = () => {
             if (!originalImage) return showToast("保存する画像がありません");
             downloadDataUrl(getCleanCanvasDataURL(), 'current_edited_image.png');
