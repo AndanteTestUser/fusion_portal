@@ -2,9 +2,30 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApiKeys } from '../context/ApiKeyContext.jsx';
 
 // 元の index.html（vanilla JS 実装）のロジックをそのまま React に移植したもの。
-// キャンバス上の一時的な描画状態（座標・切り出し済みキャンバスなど）は再描画の
-// トリガーにする必要がないため useRef（可変値）に持たせ、ボタンの見た目や
+// キャンバス上の一時的な描画状態(座標・切り出し済みキャンバスなど)は再描画の
+// トリガーにする必要がないため useRef(可変値)に持たせ、ボタンの見た目や
 // モーダルの開閉などUIに反映すべき状態だけ useState にしている。
+
+// パーツを移動した後、元の位置に残る「穴」を示すプレースホルダー色。
+// 白は絵の中(肌・服・背景のハイライト等)に自然に出現しやすく、
+// AIが「これはマスクなのか本来の絵の一部なのか」を誤認しやすいため、
+// 作品内にまず登場しないマゼンタを使い、AIにもプロンプトで明示する。
+const MASK_COLOR = '#ff00ff';
+const MASK_RGB = { r: 255, g: 0, b: 255 };
+// この距離以内の色は「マスク色とみなす」しきい値(RGBユークリッド距離)
+const MASK_COLOR_DISTANCE = 60;
+// 生成結果のマスク領域に、なおマスク色がこの割合以上残っていたら「未完了」とみなす
+const MASK_REMAIN_RATIO_LIMIT = 0.05;
+// 未完了時の自動リトライ回数(1回目を含む最大試行回数)
+const MAX_GENERATION_ATTEMPTS = 3;
+
+const isMaskColor = (r, g, b) => {
+  const dr = r - MASK_RGB.r;
+  const dg = g - MASK_RGB.g;
+  const db = b - MASK_RGB.b;
+  return Math.sqrt(dr * dr + dg * dg + db * db) < MASK_COLOR_DISTANCE;
+};
+
 export default function GeneratorPage() {
   const canvasRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -53,7 +74,7 @@ export default function GeneratorPage() {
     targetCtx.moveTo(points[0].x, points[0].y);
     for (let i = 1; i < points.length; i++) targetCtx.lineTo(points[i].x, points[i].y);
     targetCtx.closePath();
-    targetCtx.fillStyle = 'white';
+    targetCtx.fillStyle = MASK_COLOR;
     targetCtx.fill();
 
     const centerX = bounds.x + bounds.width / 2 + offset.x;
@@ -270,6 +291,50 @@ export default function GeneratorPage() {
     return cCanvas.toDataURL('image/jpeg', 0.95);
   }, [drawPiece, hasSelection]);
 
+  // 「穴」が空いた元の位置(マスクを塗った矩形)の一覧を集める。
+  // pastEdits と、現在ドラッグ中の選択パーツの両方が対象。
+  const collectMaskBounds = useCallback(() => {
+    const bounds = pastEditsRef.current.map((edit) => edit.cutPieceBounds).filter(Boolean);
+    if (hasSelection && cutPieceBoundsRef.current) {
+      bounds.push(cutPieceBoundsRef.current);
+    }
+    return bounds;
+  }, [hasSelection]);
+
+  // 生成結果の画像を検査し、マスク領域にマゼンタがどれだけ残っているかを 0〜1 の割合で返す。
+  // AIから返る画像の解像度が送信画像と異なる場合に備え、比率でスケーリングして座標を合わせる。
+  const measureMaskRemaining = useCallback((img, sourceWidth, sourceHeight, maskBounds) => {
+    if (!maskBounds.length || !sourceWidth || !sourceHeight) return 0;
+
+    const scaleX = img.width / sourceWidth;
+    const scaleY = img.height / sourceHeight;
+
+    const tmpCanvas = document.createElement('canvas');
+    tmpCanvas.width = img.width;
+    tmpCanvas.height = img.height;
+    const tmpCtx = tmpCanvas.getContext('2d');
+    tmpCtx.drawImage(img, 0, 0);
+
+    let maskPixels = 0;
+    let totalPixels = 0;
+
+    maskBounds.forEach((b) => {
+      const x = Math.max(0, Math.floor(b.x * scaleX));
+      const y = Math.max(0, Math.floor(b.y * scaleY));
+      const w = Math.min(Math.ceil(b.width * scaleX), tmpCanvas.width - x);
+      const h = Math.min(Math.ceil(b.height * scaleY), tmpCanvas.height - y);
+      if (w <= 0 || h <= 0) return;
+
+      const { data } = tmpCtx.getImageData(x, y, w, h);
+      for (let i = 0; i < data.length; i += 4) {
+        totalPixels++;
+        if (isMaskColor(data[i], data[i + 1], data[i + 2])) maskPixels++;
+      }
+    });
+
+    return totalPixels === 0 ? 0 : maskPixels / totalPixels;
+  }, []);
+
   const loadMainImage = useCallback(
     (file) => {
       if (!file) return;
@@ -346,26 +411,29 @@ export default function GeneratorPage() {
     const dataUrl = getCleanCanvasDataURL();
     setHistoryEdited(dataUrl);
     const base64Data = dataUrl.split(',')[1];
+    const sourceWidth = canvasRef.current.width;
+    const sourceHeight = canvasRef.current.height;
+    const maskBounds = collectMaskBounds();
 
     setLoading({ visible: true, text: '処理中...' });
 
-    try {
-      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image:generateContent?key=${apiKey}`;
-      const payload = {
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              {
-                text: 'This is an edited collage image where a body part was repositioned, leaving some awkward gaps or white spots. Please perform inpainting/blending: seamlessly blend the moved part with the surrounding body, clothes, and background, remove any awkward seams or gaps, and make it look like a naturally drawn, flawless illustration without altering the overall character design or composition.',
-              },
-              { inlineData: { mimeType: 'image/jpeg', data: base64Data } },
-            ],
-          },
-        ],
-        generationConfig: { responseModalities: ['IMAGE'] },
-      };
+    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image:generateContent?key=${apiKey}`;
+    const payload = {
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            {
+              text: `This is an edited collage image where a body part was repositioned. Areas filled with solid ${MASK_COLOR} (magenta) are placeholder masks marking missing image data, not an intended color — they must not remain in the output. Seamlessly inpaint every masked area and blend the moved part with the surrounding body, clothes, and background, removing all awkward seams or gaps, so the result looks like a single naturally drawn, flawless illustration with no trace of the magenta placeholder, without altering the overall character design or composition.`,
+            },
+            { inlineData: { mimeType: 'image/jpeg', data: base64Data } },
+          ],
+        },
+      ],
+      generationConfig: { responseModalities: ['IMAGE'] },
+    };
 
+    const requestOnce = async () => {
       let response;
       let delay = 1000;
       for (let i = 0; i < 3; i++) {
@@ -385,26 +453,64 @@ export default function GeneratorPage() {
       const part = result?.candidates?.[0]?.content?.parts?.find((p) => p.inlineData);
       if (!part) throw new Error('画像が返されませんでした');
 
-      const imageUrl = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
-      setHistoryGenerated(imageUrl);
+      return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+    };
 
-      const finalImg = new Image();
-      finalImg.onload = () => {
-        const canvas = canvasRef.current;
-        canvas.width = finalImg.width;
-        canvas.height = finalImg.height;
-        originalImageRef.current = finalImg;
-        pastEditsRef.current = [];
-        resetCurrentSelection();
-        setLoading({ visible: false, text: '処理中...' });
-        showToast('✨ 完了しました');
-      };
-      finalImg.src = imageUrl;
+    const loadImage = (src) =>
+      new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error('生成画像の読み込みに失敗しました'));
+        img.src = src;
+      });
+
+    try {
+      let finalImg = null;
+      let finalImageUrl = null;
+
+      for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt++) {
+        setLoading({
+          visible: true,
+          text: attempt === 1 ? '処理中...' : `マスクが残っていたため再生成中 (${attempt}/${MAX_GENERATION_ATTEMPTS})...`,
+        });
+
+        const imageUrl = await requestOnce();
+        const img = await loadImage(imageUrl);
+        const remainingRatio = measureMaskRemaining(img, sourceWidth, sourceHeight, maskBounds);
+
+        finalImg = img;
+        finalImageUrl = imageUrl;
+
+        if (remainingRatio <= MASK_REMAIN_RATIO_LIMIT) break;
+
+        if (attempt === MAX_GENERATION_ATTEMPTS) {
+          showToast('⚠️ マスクが一部残っている可能性があります');
+        }
+      }
+
+      setHistoryGenerated(finalImageUrl);
+
+      const canvas = canvasRef.current;
+      canvas.width = finalImg.width;
+      canvas.height = finalImg.height;
+      originalImageRef.current = finalImg;
+      pastEditsRef.current = [];
+      resetCurrentSelection();
+      setLoading({ visible: false, text: '処理中...' });
+      showToast('✨ 完了しました');
     } catch (error) {
       setLoading({ visible: false, text: '処理中...' });
       showToast('AI処理に失敗しました');
     }
-  }, [apiKeyInput, getCleanCanvasDataURL, resetCurrentSelection, setGeminiApiKey, showToast]);
+  }, [
+    apiKeyInput,
+    getCleanCanvasDataURL,
+    resetCurrentSelection,
+    setGeminiApiKey,
+    showToast,
+    collectMaskBounds,
+    measureMaskRemaining,
+  ]);
 
   const handleSave = useCallback(() => {
     if (!originalImageRef.current) return showToast('保存する画像がありません');
