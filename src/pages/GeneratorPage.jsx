@@ -26,6 +26,137 @@ const isMaskColor = (r, g, b) => {
   return Math.sqrt(dr * dr + dg * dg + db * db) < MASK_COLOR_DISTANCE;
 };
 
+// iOS/Safari 等では概ね縦横の積が約16,777,216px(4096×4096相当)を超えるcanvasは
+// 描画に失敗しうるため、それより十分小さい値を安全な上限として長辺を縮小する。
+// パノラマ写真やProRAW等、一部の巨大な画像が「読み込んでも反応がない」原因になりうる。
+const MAX_IMAGE_DIMENSION = 4096;
+
+// File を読み込み、デコードまで確認した上で HTMLImageElement を返す。
+// 対応していない形式(HEIC等)や壊れたデータの場合は、黙って失敗するのではなく
+// reject して呼び出し側でエラーメッセージを表示できるようにする。
+const readImageFile = (file) =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('ファイルの読み込みに失敗しました'));
+    reader.onload = (event) => {
+      const img = new Image();
+      img.onload = () => resolve({ img, dataUrl: event.target.result });
+      img.onerror = () =>
+        reject(
+          new Error('画像を読み込めませんでした(対応していない形式か、データが壊れている可能性があります)')
+        );
+      img.src = event.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+
+// 長辺が MAX_IMAGE_DIMENSION を超える画像は、canvasの描画上限を避けるため
+// 縮小した canvas を代わりに返す(Image と canvas はどちらも drawImage の
+// ソースとして、width/height プロパティを持つ点でも扱いが共通)。
+const fitWithinMaxDimension = (img) => {
+  const longSide = Math.max(img.width, img.height);
+  if (longSide <= MAX_IMAGE_DIMENSION) return img;
+
+  const scale = MAX_IMAGE_DIMENSION / longSide;
+  const resizedCanvas = document.createElement('canvas');
+  resizedCanvas.width = Math.max(1, Math.round(img.width * scale));
+  resizedCanvas.height = Math.max(1, Math.round(img.height * scale));
+  resizedCanvas.getContext('2d').drawImage(img, 0, 0, resizedCanvas.width, resizedCanvas.height);
+  return resizedCanvas;
+};
+
+// 「穴」の周辺をこの割合ぶんだけ広げた範囲までをAIの出力の信頼範囲とする
+// (パーツとの繋ぎ目を自然にブレンドするための余白)。それ以外の場所は
+// AIが何を描いても採用しない。腕時計を足す・脇の下の影を消す、といった
+// 無関係な"勝手な補完"を防ぐための境界。
+const MASK_TRUST_DILATION_RATIO = 0.4;
+
+const dilateBounds = (bounds, maxWidth, maxHeight) => {
+  const padX = bounds.width * MASK_TRUST_DILATION_RATIO;
+  const padY = bounds.height * MASK_TRUST_DILATION_RATIO;
+  const x = Math.max(0, bounds.x - padX);
+  const y = Math.max(0, bounds.y - padY);
+  const right = Math.min(maxWidth, bounds.x + bounds.width + padX);
+  const bottom = Math.min(maxHeight, bounds.y + bounds.height + padY);
+  return { x, y, width: right - x, height: bottom - y };
+};
+
+// 「穴」ごとに、その周辺だけを不透明(=AIの出力を信頼)・外側に向かって
+// 徐々に透明(=元の配置に戻る)になる楕円グラデーションのマスクを作る。
+// これをAIの出力に destination-in で掛けることで、信頼範囲の外側の
+// AIの出力を完全に捨てつつ、境界に硬いエッジが出ないようにする。
+const buildTrustMaskCanvas = (width, height, maskBounds) => {
+  const maskCanvas = document.createElement('canvas');
+  maskCanvas.width = width;
+  maskCanvas.height = height;
+  const ctx = maskCanvas.getContext('2d');
+
+  maskBounds.forEach((bounds) => {
+    const dilated = dilateBounds(bounds, width, height);
+    if (dilated.width <= 0 || dilated.height <= 0) return;
+
+    const cx = dilated.x + dilated.width / 2;
+    const cy = dilated.y + dilated.height / 2;
+    const rx = Math.max(1, dilated.width / 2);
+    const ry = Math.max(1, dilated.height / 2);
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.scale(rx, ry);
+    const gradient = ctx.createRadialGradient(0, 0, 0, 0, 0, 1);
+    gradient.addColorStop(0, 'rgba(255,255,255,1)');
+    gradient.addColorStop(0.55, 'rgba(255,255,255,1)');
+    gradient.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = gradient;
+    ctx.beginPath();
+    ctx.arc(0, 0, 1, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  });
+
+  return maskCanvas;
+};
+
+// AIの生成結果のうち、実際に穴があった場所とその周辺(信頼範囲)だけを採用し、
+// それ以外は送信時の画像(=ユーザーが配置した通りのもの)をそのまま使う。
+// 最後に、移動したパーツ自体のピクセルを常に最優先で上書きする。
+const compositeTrustedRegionsOnly = (aiImg, baseCanvas, maskBounds, piecesLayer) => {
+  const width = baseCanvas.width;
+  const height = baseCanvas.height;
+
+  const result = document.createElement('canvas');
+  result.width = width;
+  result.height = height;
+  const ctx = result.getContext('2d');
+  // 土台は常に「送信時点の画像」。AIの出力はまだ一切含まれていない。
+  ctx.drawImage(baseCanvas, 0, 0);
+
+  if (maskBounds.length > 0) {
+    // 座標系を baseCanvas の解像度に揃えるため、AIの出力をこのサイズで描き直す
+    const aiCanvas = document.createElement('canvas');
+    aiCanvas.width = width;
+    aiCanvas.height = height;
+    aiCanvas.getContext('2d').drawImage(aiImg, 0, 0, width, height);
+
+    const trustMask = buildTrustMaskCanvas(width, height, maskBounds);
+
+    const maskedAi = document.createElement('canvas');
+    maskedAi.width = width;
+    maskedAi.height = height;
+    const maskedCtx = maskedAi.getContext('2d');
+    maskedCtx.drawImage(aiCanvas, 0, 0);
+    maskedCtx.globalCompositeOperation = 'destination-in';
+    maskedCtx.drawImage(trustMask, 0, 0);
+
+    ctx.drawImage(maskedAi, 0, 0);
+  }
+
+  // 移動後のパーツは、信頼範囲の内外に関わらず常に元のピクセルへ強制的に戻す。
+  ctx.drawImage(piecesLayer, 0, 0);
+
+  return result;
+};
+
 export default function GeneratorPage() {
   const canvasRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -90,6 +221,22 @@ export default function GeneratorPage() {
       targetCtx.lineWidth = 3;
       targetCtx.strokeRect(bounds.x + offset.x, bounds.y + offset.y, bounds.width, bounds.height);
     }
+    targetCtx.restore();
+  }, []);
+
+  // drawPiece からマスク塗り・選択枠を省き、移動後のパーツ画像だけを描くバージョン。
+  // AIの生成結果に、ユーザーが配置した通りのピクセルをそのまま上書きするために使う
+  // (=「移動後のパーツは絶対」として扱い、AIに再解釈させない)。
+  const drawPieceImageOnly = useCallback((targetCtx, pieceCanvasLayer, bounds, offset, rotation) => {
+    if (!pieceCanvasLayer || !bounds) return;
+
+    targetCtx.save();
+    const centerX = bounds.x + bounds.width / 2 + offset.x;
+    const centerY = bounds.y + bounds.height / 2 + offset.y;
+    targetCtx.translate(centerX, centerY);
+    targetCtx.rotate((rotation * Math.PI) / 180);
+    targetCtx.translate(-centerX, -centerY);
+    targetCtx.drawImage(pieceCanvasLayer, offset.x, offset.y);
     targetCtx.restore();
   }, []);
 
@@ -259,7 +406,10 @@ export default function GeneratorPage() {
     }
   }, [createCutPiece, renderCanvas, resetCurrentSelection, setMode]);
 
-  const getCleanCanvasDataURL = useCallback(() => {
+  // 現在の状態(元画像+配置済みパーツ+マスク色の穴)をそのまま描いたcanvasを返す。
+  // AIへ送る画像であると同時に、生成後に「信頼範囲の外側」で使う土台にもなる
+  // (=ユーザーが配置した通りのもの。AIの出力はまだ一切含まない)。
+  const buildCleanCanvas = useCallback(() => {
     const canvas = canvasRef.current;
     const cCanvas = document.createElement('canvas');
     cCanvas.width = canvas.width;
@@ -288,8 +438,12 @@ export default function GeneratorPage() {
         false
       );
     }
-    return cCanvas.toDataURL('image/jpeg', 0.95);
+    return cCanvas;
   }, [drawPiece, hasSelection]);
+
+  const getCleanCanvasDataURL = useCallback(() => {
+    return buildCleanCanvas().toDataURL('image/jpeg', 0.95);
+  }, [buildCleanCanvas]);
 
   // 「穴」が空いた元の位置(マスクを塗った矩形)の一覧を集める。
   // pastEdits と、現在ドラッグ中の選択パーツの両方が対象。
@@ -335,29 +489,54 @@ export default function GeneratorPage() {
     return totalPixels === 0 ? 0 : maskPixels / totalPixels;
   }, []);
 
+  // 現在配置されている全パーツ(移動・回転後)の画像だけを、透明背景のレイヤーとして描く。
+  // マスク色の塗りつぶしや土台の元画像は含まない。
+  const buildPiecesOnlyLayer = useCallback(() => {
+    const canvas = canvasRef.current;
+    const layer = document.createElement('canvas');
+    layer.width = canvas.width;
+    layer.height = canvas.height;
+    const ctx = layer.getContext('2d');
+
+    pastEditsRef.current.forEach((edit) =>
+      drawPieceImageOnly(ctx, edit.cutPieceCanvas, edit.cutPieceBounds, edit.dragOffset, edit.cutPieceRotation)
+    );
+    if (hasSelection) {
+      drawPieceImageOnly(
+        ctx,
+        cutPieceCanvasRef.current,
+        cutPieceBoundsRef.current,
+        dragOffsetRef.current,
+        cutPieceRotationRef.current
+      );
+    }
+    return layer;
+  }, [hasSelection, drawPieceImageOnly]);
+
   const loadMainImage = useCallback(
-    (file) => {
+    async (file) => {
       if (!file) return;
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        const img = new Image();
-        img.onload = () => {
-          const canvas = canvasRef.current;
-          canvas.width = img.width;
-          canvas.height = img.height;
-          originalImageRef.current = img;
-          pastEditsRef.current = [];
-          resetCurrentSelection();
+      try {
+        const { img, dataUrl } = await readImageFile(file);
+        const source = fitWithinMaxDimension(img);
 
-          setHistoryOriginal(event.target.result);
-          setHistoryEdited(null);
-          setHistoryGenerated(null);
+        const canvas = canvasRef.current;
+        canvas.width = source.width;
+        canvas.height = source.height;
+        originalImageRef.current = source;
+        pastEditsRef.current = [];
+        resetCurrentSelection();
 
-          showToast('画像を読み込みました');
-        };
-        img.src = event.target.result;
-      };
-      reader.readAsDataURL(file);
+        setHistoryOriginal(dataUrl);
+        setHistoryEdited(null);
+        setHistoryGenerated(null);
+
+        showToast(
+          source === img ? '画像を読み込みました' : '画像を読み込みました(サイズが大きいため縮小しました)'
+        );
+      } catch (error) {
+        showToast(error.message || '画像を読み込めませんでした');
+      }
     },
     [resetCurrentSelection, showToast]
   );
@@ -408,12 +587,16 @@ export default function GeneratorPage() {
     if (!apiKey) return showToast('APIキーを入力してください');
     setGeminiApiKey(apiKey);
 
-    const dataUrl = getCleanCanvasDataURL();
+    const baseCanvas = buildCleanCanvas();
+    const dataUrl = baseCanvas.toDataURL('image/jpeg', 0.95);
     setHistoryEdited(dataUrl);
     const base64Data = dataUrl.split(',')[1];
-    const sourceWidth = canvasRef.current.width;
-    const sourceHeight = canvasRef.current.height;
+    const sourceWidth = baseCanvas.width;
+    const sourceHeight = baseCanvas.height;
     const maskBounds = collectMaskBounds();
+    // 「移動後のパーツは絶対」として扱うため、生成結果を受け取った後にこのレイヤーを
+    // そのまま焼き込み直す。AIがパーツ自体を描き変えても最終的には上書きされる。
+    const piecesLayer = buildPiecesOnlyLayer();
 
     setLoading({ visible: true, text: '処理中...' });
 
@@ -424,7 +607,7 @@ export default function GeneratorPage() {
           role: 'user',
           parts: [
             {
-              text: `This is an edited collage image where a body part was repositioned. Areas filled with solid ${MASK_COLOR} (magenta) are placeholder masks marking missing image data, not an intended color — they must not remain in the output. Seamlessly inpaint every masked area and blend the moved part with the surrounding body, clothes, and background, removing all awkward seams or gaps, so the result looks like a single naturally drawn, flawless illustration with no trace of the magenta placeholder, without altering the overall character design or composition.`,
+              text: `This is an edited collage image where a body part was repositioned to a new location. Treat the repositioned part's new position, pose, and pixels as FIXED and ABSOLUTE — do not redraw, reshape, or reinterpret the moved part itself. Instead, redraw only the small area immediately AROUND it (the connecting anatomy such as the arm or joint leading into it) so that it naturally connects to the moved part in its new position. Areas filled with solid ${MASK_COLOR} (magenta) are placeholder masks marking missing image data, not an intended color — they must not remain in the output; seamlessly inpaint every masked area and any awkward seams or gaps around the moved part. Do NOT add, remove, or change anything else in the image: no new objects, accessories, jewelry, or clothing that were not already there, and no changes to existing skin texture, shading, wrinkles, creases, or shadows anywhere outside the masked/seam area. Keep the exact original art style and level of detail everywhere else, without altering the overall character design or composition.`,
             },
             { inlineData: { mimeType: 'image/jpeg', data: base64Data } },
           ],
@@ -488,12 +671,19 @@ export default function GeneratorPage() {
         }
       }
 
-      setHistoryGenerated(finalImageUrl);
+      // AIの出力は「穴とその周辺(繋ぎ目のブレンドに必要な範囲)」だけを信頼し、
+      // それ以外は送信時の画像(=ユーザーが配置した通りのもの)をそのまま使う。
+      // これにより、腕時計を足す・脇の下の影を消すといった無関係な場所への
+      // "勝手な補完"を防ぎつつ、移動後のパーツ自体は常に元のピクセルへ戻す。
+      const composited = compositeTrustedRegionsOnly(finalImg, baseCanvas, maskBounds, piecesLayer);
+      const compositedUrl = composited.toDataURL('image/png');
+
+      setHistoryGenerated(compositedUrl);
 
       const canvas = canvasRef.current;
-      canvas.width = finalImg.width;
-      canvas.height = finalImg.height;
-      originalImageRef.current = finalImg;
+      canvas.width = composited.width;
+      canvas.height = composited.height;
+      originalImageRef.current = composited;
       pastEditsRef.current = [];
       resetCurrentSelection();
       setLoading({ visible: false, text: '処理中...' });
@@ -504,12 +694,13 @@ export default function GeneratorPage() {
     }
   }, [
     apiKeyInput,
-    getCleanCanvasDataURL,
+    buildCleanCanvas,
     resetCurrentSelection,
     setGeminiApiKey,
     showToast,
     collectMaskBounds,
     measureMaskRemaining,
+    buildPiecesOnlyLayer,
   ]);
 
   const handleSave = useCallback(() => {
@@ -518,37 +709,41 @@ export default function GeneratorPage() {
   }, [downloadDataUrl, getCleanCanvasDataURL, showToast]);
 
   const handleImportOriginal = useCallback(
-    (file) => {
+    async (file) => {
       if (!file) return;
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        setHistoryOriginal(event.target.result);
-        const img = new Image();
-        img.onload = () => {
-          const canvas = canvasRef.current;
-          canvas.width = img.width;
-          canvas.height = img.height;
-          originalImageRef.current = img;
-          pastEditsRef.current = [];
-          resetCurrentSelection();
-          showToast('① 元画像を読み込みました');
-        };
-        img.src = event.target.result;
-      };
-      reader.readAsDataURL(file);
+      try {
+        const { img, dataUrl } = await readImageFile(file);
+        const source = fitWithinMaxDimension(img);
+
+        setHistoryOriginal(dataUrl);
+        const canvas = canvasRef.current;
+        canvas.width = source.width;
+        canvas.height = source.height;
+        originalImageRef.current = source;
+        pastEditsRef.current = [];
+        resetCurrentSelection();
+        showToast(
+          source === img
+            ? '① 元画像を読み込みました'
+            : '① 元画像を読み込みました(サイズが大きいため縮小しました)'
+        );
+      } catch (error) {
+        showToast(error.message || '① 元画像を読み込めませんでした');
+      }
     },
     [resetCurrentSelection, showToast]
   );
 
   const handleImportEdited = useCallback(
-    (file) => {
+    async (file) => {
       if (!file) return;
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        setHistoryEdited(event.target.result);
+      try {
+        const { dataUrl } = await readImageFile(file);
+        setHistoryEdited(dataUrl);
         showToast('② 編集状態の画像を読み込みました');
-      };
-      reader.readAsDataURL(file);
+      } catch (error) {
+        showToast(error.message || '② 編集状態の画像を読み込めませんでした');
+      }
     },
     [showToast]
   );
