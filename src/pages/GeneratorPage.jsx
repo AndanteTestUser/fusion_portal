@@ -81,6 +81,43 @@ const dilateBounds = (bounds, maxWidth, maxHeight) => {
   return { x, y, width: right - x, height: bottom - y };
 };
 
+// 移動・回転後にパーツが実際に配置されているバウンディングボックスを計算する。
+// drawPiece/drawPieceImageOnly と同じ変換(元の中心を軸に回転してからオフセットを加える)
+// を矩形の4隅に適用し、その外接矩形を返す。
+// 「穴」の元の位置だけでなく、パーツの新しい位置の繋ぎ目も信頼範囲に含めるために使う
+// (これがないと、パーツを大きく動かすほどAIが繋ぎ目を描き直しても
+// compositeTrustedRegionsOnly の段階で無条件に捨てられてしまう)。
+const computeMovedBounds = (bounds, offset, rotation) => {
+  const centerX = bounds.x + bounds.width / 2;
+  const centerY = bounds.y + bounds.height / 2;
+  const rad = (rotation * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  const corners = [
+    { x: bounds.x, y: bounds.y },
+    { x: bounds.x + bounds.width, y: bounds.y },
+    { x: bounds.x, y: bounds.y + bounds.height },
+    { x: bounds.x + bounds.width, y: bounds.y + bounds.height },
+  ];
+
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  corners.forEach((p) => {
+    const dx = p.x - centerX;
+    const dy = p.y - centerY;
+    const rx = centerX + dx * cos - dy * sin + offset.x;
+    const ry = centerY + dx * sin + dy * cos + offset.y;
+    minX = Math.min(minX, rx);
+    minY = Math.min(minY, ry);
+    maxX = Math.max(maxX, rx);
+    maxY = Math.max(maxY, ry);
+  });
+
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+};
+
 // 「穴」ごとに、その周辺だけを不透明(=AIの出力を信頼)・外側に向かって
 // 徐々に透明(=元の配置に戻る)になる楕円グラデーションのマスクを作る。
 // これをAIの出力に destination-in で掛けることで、信頼範囲の外側の
@@ -207,6 +244,17 @@ export default function GeneratorPage() {
     targetCtx.closePath();
     targetCtx.fillStyle = MASK_COLOR;
     targetCtx.fill();
+
+    // 手動でなぞった輪郭は実物の輪郭よりわずかに内側にずれやすく、塗りつぶしだけでは
+    // 境界に数ピクセルの「残像」(元のパーツの端)が消されずに残ることがある。
+    // 同じ輪郭を太めの線でなぞって、境界の外側にも一定の余白を持たせて
+    // マスク領域(=消す/AIに補完させる範囲)に含める。
+    const minSide = Math.max(1, Math.min(bounds.width, bounds.height));
+    const holeExpandPx = Math.min(40, Math.max(6, minSide * 0.06));
+    targetCtx.lineJoin = 'round';
+    targetCtx.lineWidth = holeExpandPx * 2;
+    targetCtx.strokeStyle = MASK_COLOR;
+    targetCtx.stroke();
 
     const centerX = bounds.x + bounds.width / 2 + offset.x;
     const centerY = bounds.y + bounds.height / 2 + offset.y;
@@ -445,12 +493,22 @@ export default function GeneratorPage() {
     return buildCleanCanvas().toDataURL('image/jpeg', 0.95);
   }, [buildCleanCanvas]);
 
-  // 「穴」が空いた元の位置(マスクを塗った矩形)の一覧を集める。
+  // 「穴」が空いた元の位置(マスクを塗った矩形)と、パーツが移動・回転した後の
+  // 新しい位置(繋ぎ目のブレンドが必要な範囲)の両方を集める。
   // pastEdits と、現在ドラッグ中の選択パーツの両方が対象。
+  // 新しい位置も含めないと、パーツを動かした先の繋ぎ目にAIの結果が一切反映されない。
   const collectMaskBounds = useCallback(() => {
-    const bounds = pastEditsRef.current.map((edit) => edit.cutPieceBounds).filter(Boolean);
+    const bounds = [];
+    pastEditsRef.current.forEach((edit) => {
+      if (!edit.cutPieceBounds) return;
+      bounds.push(edit.cutPieceBounds);
+      bounds.push(computeMovedBounds(edit.cutPieceBounds, edit.dragOffset, edit.cutPieceRotation));
+    });
     if (hasSelection && cutPieceBoundsRef.current) {
       bounds.push(cutPieceBoundsRef.current);
+      bounds.push(
+        computeMovedBounds(cutPieceBoundsRef.current, dragOffsetRef.current, cutPieceRotationRef.current)
+      );
     }
     return bounds;
   }, [hasSelection]);
@@ -648,8 +706,7 @@ export default function GeneratorPage() {
       });
 
     try {
-      let finalImg = null;
-      let finalImageUrl = null;
+      let composited = null;
       // 最終試行後もマスクが残っていたかどうか。残っていた場合は、穴の情報
       // (pastEdits・選択中パーツ)をクリアせずに残し、「AI実行」をもう一度押すだけで
       // 同じ穴に対して再試行できるようにする(でないと穴の位置情報が失われ、
@@ -664,20 +721,22 @@ export default function GeneratorPage() {
 
         const imageUrl = await requestOnce();
         const img = await loadImage(imageUrl);
-        const remainingRatio = measureMaskRemaining(img, sourceWidth, sourceHeight, maskBounds);
 
-        finalImg = img;
-        finalImageUrl = imageUrl;
+        // AIの出力は「穴とその周辺(繋ぎ目のブレンドに必要な範囲)」だけを信頼し、
+        // それ以外は送信時の画像(=ユーザーが配置した通りのもの)をそのまま使う。
+        // これにより、腕時計を足す・脇の下の影を消すといった無関係な場所への
+        // "勝手な補完"を防ぎつつ、移動後のパーツ自体は常に元のピクセルへ戻す。
+        composited = compositeTrustedRegionsOnly(img, baseCanvas, maskBounds, piecesLayer);
+
+        // マスク残存の判定は、AIの生の出力ではなく実際に表示される合成後の画像に対して行う。
+        // 生の出力だけを見ると、信頼範囲外だったせいで捨てられた結果
+        // (=実際にはまだマゼンタが見えている)を「完了」と誤判定してしまうため。
+        const remainingRatio = measureMaskRemaining(composited, sourceWidth, sourceHeight, maskBounds);
         stillHasMask = remainingRatio > MASK_REMAIN_RATIO_LIMIT;
 
         if (!stillHasMask) break;
       }
 
-      // AIの出力は「穴とその周辺(繋ぎ目のブレンドに必要な範囲)」だけを信頼し、
-      // それ以外は送信時の画像(=ユーザーが配置した通りのもの)をそのまま使う。
-      // これにより、腕時計を足す・脇の下の影を消すといった無関係な場所への
-      // "勝手な補完"を防ぎつつ、移動後のパーツ自体は常に元のピクセルへ戻す。
-      const composited = compositeTrustedRegionsOnly(finalImg, baseCanvas, maskBounds, piecesLayer);
       const compositedUrl = composited.toDataURL('image/png');
 
       setHistoryGenerated(compositedUrl);
