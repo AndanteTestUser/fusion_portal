@@ -1,9 +1,12 @@
-import { createContext, useCallback, useContext, useState } from 'react';
+import { createContext, useCallback, useContext, useMemo, useState } from 'react';
+import { providers } from '../providers.js';
+import { hasVault } from '../lib/vault.js';
 
 const STORAGE_KEY = 'fusion_portal_providers';
 
-// 将来 OpenAI 等を追加しやすいよう { providers: { gemini: {...}, openai: {...} } } の形を
-// 見据えつつ、現段階では Gemini のみ実装する。
+// { [providerId]: { apiKey, keyPageUrl } } の形で保持する。
+// sessionStorage に保存するのは意図的な選択で、タブを閉じれば消える
+// (端末に永続化したい場合はオプションの Vault を利用する。src/lib/vault.js 参照)。
 function loadInitial() {
   try {
     const raw = sessionStorage.getItem(STORAGE_KEY);
@@ -11,31 +14,82 @@ function loadInitial() {
   } catch (e) {
     // sessionStorage が使えない/壊れている場合は無視して初期値を使う
   }
-  return { gemini: { apiKey: '' } };
+  return {};
+}
+
+function persist(entries) {
+  try {
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
+  } catch (e) {
+    // 保存に失敗してもアプリの動作自体は継続する(メモリ上の state のみで動く)
+  }
 }
 
 const ApiKeyContext = createContext(null);
 
 export function ApiKeyProvider({ children }) {
-  const [providers, setProviders] = useState(loadInitial);
+  const [entries, setEntries] = useState(loadInitial);
 
-  const setGeminiApiKey = useCallback((apiKey) => {
-    setProviders((prev) => {
-      const next = { ...prev, gemini: { ...prev.gemini, apiKey } };
-      try {
-        // localStorage ではなく sessionStorage に保存し、タブを閉じれば消えるようにする
-        sessionStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-      } catch (e) {
-        // 保存に失敗してもアプリの動作自体は継続する（メモリ上の state のみで動く）
-      }
+  const setApiKey = useCallback((id, apiKey) => {
+    setEntries((prev) => {
+      const next = { ...prev, [id]: { ...prev[id], apiKey } };
+      persist(next);
       return next;
     });
   }, []);
 
-  const value = {
-    geminiApiKey: providers.gemini?.apiKey || '',
-    setGeminiApiKey,
-  };
+  const setKeyPageUrl = useCallback((id, keyPageUrl) => {
+    setEntries((prev) => {
+      const next = { ...prev, [id]: { ...prev[id], keyPageUrl } };
+      persist(next);
+      return next;
+    });
+  }, []);
+
+  // このセッションからプロバイダーの情報を削除する。端末に Vault が
+  // 作成済みの場合、そちらのデータはこの操作では削除されないため、
+  // 呼び出し側に { vaultKept: true } を伝えて案内できるようにする。
+  const clearProvider = useCallback((id) => {
+    setEntries((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      persist(next);
+      return next;
+    });
+    return { vaultKept: hasVault() };
+  }, []);
+
+  const getKeyPageUrl = useCallback(
+    (id) => {
+      const custom = entries[id]?.keyPageUrl;
+      if (custom && custom.startsWith('https://')) return custom;
+      return providers.find((p) => p.id === id)?.defaultKeyPageUrl || '';
+    },
+    [entries]
+  );
+
+  const isCustomUrl = useCallback(
+    (id) => Boolean(entries[id]?.keyPageUrl && entries[id].keyPageUrl.startsWith('https://')),
+    [entries]
+  );
+
+  // GeneratorPage.jsx が useCallback の依存配列に含めているため、
+  // 呼び出しごとに参照が変わらない安定した関数である必要がある。
+  const setGeminiApiKey = useCallback((apiKey) => setApiKey('gemini', apiKey), [setApiKey]);
+
+  const value = useMemo(
+    () => ({
+      geminiApiKey: entries.gemini?.apiKey || '',
+      setGeminiApiKey,
+      entries,
+      setApiKey,
+      setKeyPageUrl,
+      clearProvider,
+      getKeyPageUrl,
+      isCustomUrl,
+    }),
+    [entries, setGeminiApiKey, setApiKey, setKeyPageUrl, clearProvider, getKeyPageUrl, isCustomUrl]
+  );
 
   return <ApiKeyContext.Provider value={value}>{children}</ApiKeyContext.Provider>;
 }
