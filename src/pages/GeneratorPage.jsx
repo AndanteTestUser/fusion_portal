@@ -650,6 +650,11 @@ export default function GeneratorPage() {
     try {
       let finalImg = null;
       let finalImageUrl = null;
+      // 最終試行後もマスクが残っていたかどうか。残っていた場合は、穴の情報
+      // (pastEdits・選択中パーツ)をクリアせずに残し、「AI実行」をもう一度押すだけで
+      // 同じ穴に対して再試行できるようにする(でないと穴の位置情報が失われ、
+      // ただ押し直しても何も変わらなくなってしまう)。
+      let stillHasMask = false;
 
       for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt++) {
         setLoading({
@@ -663,12 +668,9 @@ export default function GeneratorPage() {
 
         finalImg = img;
         finalImageUrl = imageUrl;
+        stillHasMask = remainingRatio > MASK_REMAIN_RATIO_LIMIT;
 
-        if (remainingRatio <= MASK_REMAIN_RATIO_LIMIT) break;
-
-        if (attempt === MAX_GENERATION_ATTEMPTS) {
-          showToast('⚠️ マスクが一部残っている可能性があります');
-        }
+        if (!stillHasMask) break;
       }
 
       // AIの出力は「穴とその周辺(繋ぎ目のブレンドに必要な範囲)」だけを信頼し、
@@ -684,10 +686,20 @@ export default function GeneratorPage() {
       canvas.width = composited.width;
       canvas.height = composited.height;
       originalImageRef.current = composited;
-      pastEditsRef.current = [];
-      resetCurrentSelection();
-      setLoading({ visible: false, text: '処理中...' });
-      showToast('✨ 完了しました');
+
+      if (stillHasMask) {
+        // pastEdits・選択中パーツはそのまま維持。土台(originalImageRef)だけを
+        // 今回の結果に差し替えて再描画することで、穴の位置・パーツの配置を保ったまま
+        // 次の「AI実行」で同じ箇所を再試行できる。
+        renderCanvas();
+        setLoading({ visible: false, text: '処理中...' });
+        showToast('⚠️ マスクが残りました。もう一度「AI実行」を押すと同じ箇所を再試行します');
+      } else {
+        pastEditsRef.current = [];
+        resetCurrentSelection();
+        setLoading({ visible: false, text: '処理中...' });
+        showToast('✨ 完了しました');
+      }
     } catch (error) {
       setLoading({ visible: false, text: '処理中...' });
       showToast('AI処理に失敗しました');
@@ -696,6 +708,7 @@ export default function GeneratorPage() {
     apiKeyInput,
     buildCleanCanvas,
     resetCurrentSelection,
+    renderCanvas,
     setGeminiApiKey,
     showToast,
     collectMaskBounds,
