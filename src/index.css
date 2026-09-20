@@ -10,6 +10,25 @@ body,
   padding: 0;
 }
 
+body {
+  overflow: hidden;
+  overscroll-behavior: none;
+  background-color: #171717;
+}
+
+/* ホーム画面から全画面で開いたとき、時計・電池表示と重ならないようにする */
+#root {
+  box-sizing: border-box;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right)
+    env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+
+/* 100vh は iPad の Safari だとバーの分だけはみ出して上部ボタンが隠れる原因になるため、
+   実際に見えている高さ（親の100%）に置き換える */
+.h-screen {
+  height: 100%;
+}
+
 @layer components {
   .btn {
     @apply cursor-pointer whitespace-nowrap rounded-md border border-neutral-600 bg-neutral-700 px-3 py-2 text-[13px] text-white transition-all duration-200;
