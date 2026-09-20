@@ -65,22 +65,6 @@ const fitWithinMaxDimension = (img) => {
   return resizedCanvas;
 };
 
-// 「穴」の周辺をこの割合ぶんだけ広げた範囲までをAIの出力の信頼範囲とする
-// (パーツとの繋ぎ目を自然にブレンドするための余白)。それ以外の場所は
-// AIが何を描いても採用しない。腕時計を足す・脇の下の影を消す、といった
-// 無関係な"勝手な補完"を防ぐための境界。
-const MASK_TRUST_DILATION_RATIO = 0.4;
-
-const dilateBounds = (bounds, maxWidth, maxHeight) => {
-  const padX = bounds.width * MASK_TRUST_DILATION_RATIO;
-  const padY = bounds.height * MASK_TRUST_DILATION_RATIO;
-  const x = Math.max(0, bounds.x - padX);
-  const y = Math.max(0, bounds.y - padY);
-  const right = Math.min(maxWidth, bounds.x + bounds.width + padX);
-  const bottom = Math.min(maxHeight, bounds.y + bounds.height + padY);
-  return { x, y, width: right - x, height: bottom - y };
-};
-
 // 移動・回転後にパーツが実際に配置されているバウンディングボックスを計算する。
 // drawPiece/drawPieceImageOnly と同じ変換(元の中心を軸に回転してからオフセットを加える)
 // を矩形の4隅に適用し、その外接矩形を返す。
@@ -118,37 +102,42 @@ const computeMovedBounds = (bounds, offset, rotation) => {
   return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
 };
 
-// 「穴」ごとに、その周辺だけを不透明(=AIの出力を信頼)・外側に向かって
-// 徐々に透明(=元の配置に戻る)になる楕円グラデーションのマスクを作る。
-// これをAIの出力に destination-in で掛けることで、信頼範囲の外側の
-// AIの出力を完全に捨てつつ、境界に硬いエッジが出ないようにする。
+// 穴(マスク色で塗った範囲)は必ずAIの出力で完全に置き換える。
+// 以前は楕円+放射グラデーションで、穴の縁でAIの出力が半透明(約64%)、
+// 矩形の四隅ではほぼ0%になり、土台のマゼンタが透けて残っていた。
+// solidPad: 穴の矩形+輪郭拡張(最大40px)+余白までを完全に不透明にする範囲
+// feather : その外側で元画像へ徐々に戻していく幅
+// フェードは ctx.filter(blur) がSafari/iOSで使えないため、薄い矩形の重ね塗りで作る。
 const buildTrustMaskCanvas = (width, height, maskBounds) => {
   const maskCanvas = document.createElement('canvas');
   maskCanvas.width = width;
   maskCanvas.height = height;
   const ctx = maskCanvas.getContext('2d');
 
-  maskBounds.forEach((bounds) => {
-    const dilated = dilateBounds(bounds, width, height);
-    if (dilated.width <= 0 || dilated.height <= 0) return;
+  const FEATHER_STEPS = 10;
+  const FEATHER_LAYER_ALPHA = 0.18;
 
-    const cx = dilated.x + dilated.width / 2;
-    const cy = dilated.y + dilated.height / 2;
-    const rx = Math.max(1, dilated.width / 2);
-    const ry = Math.max(1, dilated.height / 2);
+  const fillPaddedRect = (b, pad) => {
+    const x = Math.max(0, b.x - pad);
+    const y = Math.max(0, b.y - pad);
+    const right = Math.min(width, b.x + b.width + pad);
+    const bottom = Math.min(height, b.y + b.height + pad);
+    if (right - x <= 0 || bottom - y <= 0) return;
+    ctx.fillRect(x, y, right - x, bottom - y);
+  };
 
-    ctx.save();
-    ctx.translate(cx, cy);
-    ctx.scale(rx, ry);
-    const gradient = ctx.createRadialGradient(0, 0, 0, 0, 0, 1);
-    gradient.addColorStop(0, 'rgba(255,255,255,1)');
-    gradient.addColorStop(0.55, 'rgba(255,255,255,1)');
-    gradient.addColorStop(1, 'rgba(255,255,255,0)');
-    ctx.fillStyle = gradient;
-    ctx.beginPath();
-    ctx.arc(0, 0, 1, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
+  maskBounds.forEach((b) => {
+    const longSide = Math.max(b.width, b.height);
+    const solidPad = Math.max(48, longSide * 0.15);
+    const feather = Math.max(24, longSide * 0.25);
+
+    ctx.fillStyle = `rgba(255,255,255,${FEATHER_LAYER_ALPHA})`;
+    for (let i = FEATHER_STEPS; i >= 1; i--) {
+      fillPaddedRect(b, solidPad + (feather * i) / FEATHER_STEPS);
+    }
+
+    ctx.fillStyle = 'rgba(255,255,255,1)';
+    fillPaddedRect(b, solidPad);
   });
 
   return maskCanvas;
@@ -707,6 +696,9 @@ export default function GeneratorPage() {
 
     try {
       let composited = null;
+      // 最後の試行ではなく、マスク残存率が最小だった結果を採用する。
+      let bestComposited = null;
+      let bestRatio = Infinity;
       // 最終試行後もマスクが残っていたかどうか。残っていた場合は、穴の情報
       // (pastEdits・選択中パーツ)をクリアせずに残し、「AI実行」をもう一度押すだけで
       // 同じ穴に対して再試行できるようにする(でないと穴の位置情報が失われ、
@@ -732,10 +724,16 @@ export default function GeneratorPage() {
         // 生の出力だけを見ると、信頼範囲外だったせいで捨てられた結果
         // (=実際にはまだマゼンタが見えている)を「完了」と誤判定してしまうため。
         const remainingRatio = measureMaskRemaining(composited, sourceWidth, sourceHeight, maskBounds);
-        stillHasMask = remainingRatio > MASK_REMAIN_RATIO_LIMIT;
+        if (remainingRatio < bestRatio) {
+          bestRatio = remainingRatio;
+          bestComposited = composited;
+        }
+        stillHasMask = bestRatio > MASK_REMAIN_RATIO_LIMIT;
 
         if (!stillHasMask) break;
       }
+
+      composited = bestComposited;
 
       const compositedUrl = composited.toDataURL('image/png');
 
