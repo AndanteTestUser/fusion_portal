@@ -17,4 +17,11 @@ export const tools = [
     description: '遮蔽を一時的に解き、両腕を頭側へ伸ばして復元します。',
     component: lazy(() => import('./pages/BanzaiPosePage.jsx')),
   },
+  {
+    path: '/gemini-canvas',
+    title: 'Gemini Canvas',
+    icon: '✨',
+    description: '構図を解析し、元画像と比較しながらスタイル変換します。',
+    component: lazy(() => import('./pages/GeminiCanvasPage.jsx')),
+  },
 ];
