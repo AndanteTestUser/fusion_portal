@@ -29,10 +29,10 @@ function getFolder_() {
 
 // ショートカットからの画像アップロードを受け取る。
 // リクエストボディ(JSON):
-//   { secret, dataBase64, mimeType, filename, targetPath?, checked? }
-//   targetPath: 送り先の機能ページ(例: "/generator")を最初から指定したい場合のみ。
-//   checked: true にすると、fusion_portal側で取り込んだ時点で自動選択状態になる
-//            (targetPathが未指定の場合は無視される)。
+//   { secret, dataBase64, mimeType, filename, targetPath? }
+//   targetPath: 省略可。省略した場合、fusion_portal側では「次に開いた機能
+//   ページへ自動的に反映される」画像として扱われる(通常はこれでよい)。
+//   特定の機能ページ専用にしたい場合だけ指定する(例: "/generator")。
 function doPost(e) {
   try {
     const body = JSON.parse(e.postData.contents);
@@ -54,7 +54,6 @@ function doPost(e) {
       JSON.stringify({
         filename,
         targetPath: body.targetPath || null,
-        checked: Boolean(body.checked),
       })
     );
 
@@ -98,7 +97,6 @@ function doGet(e) {
         dataUrl: `data:${mimeType};base64,${base64}`,
         filename: meta.filename || file.getName(),
         targetPath: meta.targetPath || null,
-        checked: Boolean(meta.checked),
         createdAt: file.getDateCreated().getTime(),
       });
       toTrash.push(file);

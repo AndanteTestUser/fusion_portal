@@ -8,9 +8,9 @@ import {
   mergeGasImages,
   addImageToList,
   removeImageFromList,
-  setCheckedInList,
   setTargetPathInList,
   setPersistedInList,
+  getImageToApply,
   generateImageId,
 } from '../lib/wkImageStore.js';
 
@@ -34,7 +34,6 @@ export function WkImageProvider({ children }) {
         dataUrl,
         filename: filename || '',
         targetPath,
-        checked: false,
         persisted: false,
         source,
         createdAt: Date.now(),
@@ -57,14 +56,6 @@ export function WkImageProvider({ children }) {
     });
   }, []);
 
-  const setChecked = useCallback((id, checked) => {
-    setImages((prev) => {
-      const next = setCheckedInList(prev, id, checked);
-      saveWkImages(next);
-      return next;
-    });
-  }, []);
-
   const setTargetPath = useCallback((id, targetPath) => {
     setImages((prev) => {
       const next = setTargetPathInList(prev, id, targetPath);
@@ -81,11 +72,12 @@ export function WkImageProvider({ children }) {
     });
   }, []);
 
-  // 機能ページが自動選択を実行した後に呼ぶ。チェックだけを外し、一覧からは削除しない
-  // (単発の受け渡し用途のため、同じ画像を毎回自動適用し続けないようにする)。
-  const consumeChecked = useCallback((id) => {
+  // 機能ページが自動適用を実行した後に呼ぶ。単発の受け渡し用途のため、
+  // 適用済みの画像は一覧から削除する(同じ画像が別のページにも
+  // 勝手に再適用されたり、一覧に残り続けたりしないようにするため)。
+  const consumeImage = useCallback((id) => {
     setImages((prev) => {
-      const next = setCheckedInList(prev, id, false);
+      const next = removeImageFromList(prev, id);
       saveWkImages(next);
       return next;
     });
@@ -158,21 +150,17 @@ export function WkImageProvider({ children }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gasConfig.url, gasConfig.secret, gasConfig.autoPoll]);
 
-  const getCheckedImageForPath = useCallback(
-    (path) => images.find((img) => img.targetPath === path && img.checked) || null,
-    [images]
-  );
+  const getApplicableImage = useCallback((path) => getImageToApply(images, path), [images]);
 
   const value = useMemo(
     () => ({
       images,
       addImage,
       removeImage,
-      setChecked,
       setTargetPath,
       setPersisted,
-      consumeChecked,
-      getCheckedImageForPath,
+      consumeImage,
+      getApplicableImage,
       gasConfig,
       saveGasConfig: saveGasConfigAndState,
       gasStatus,
@@ -182,11 +170,10 @@ export function WkImageProvider({ children }) {
       images,
       addImage,
       removeImage,
-      setChecked,
       setTargetPath,
       setPersisted,
-      consumeChecked,
-      getCheckedImageForPath,
+      consumeImage,
+      getApplicableImage,
       gasConfig,
       saveGasConfigAndState,
       gasStatus,
