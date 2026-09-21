@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApiKeys } from '../context/ApiKeyContext.jsx';
 import { useWkAutoLoad } from '../hooks/useWkAutoLoad.js';
 import {
-  composeSelected, copyCanvas, editWithProvider, estimateBanzaiTargets, makePoseGuide,
-  makeCanvas, maskHasPaint, restoreOccluder, selectedChangeRatio,
+  analyzePoseWithProvider, composeSelected, copyCanvas, createAutomaticPlan, editWithProvider,
+  estimateBanzaiTargets, makePoseGuide, makeCanvas, maskHasPaint, restoreOccluder, selectedChangeRatio,
 } from '../lib/banzaiPipeline.js';
 
 const LANDMARKS = ['head', 'torso', 'leftShoulder', 'rightShoulder'];
@@ -55,6 +55,7 @@ export default function BanzaiPosePage() {
   const { entries } = useApiKeys();
   const [provider, setProvider] = useState('openai');
   const [stage, setStage] = useState('occluder');
+  const [advanced, setAdvanced] = useState(false);
   const [preview, setPreview] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('原画像を読み込んでください。');
@@ -86,13 +87,13 @@ export default function BanzaiPosePage() {
     visible.height = image.height;
     const ctx = visible.getContext('2d');
     ctx.drawImage(image, 0, 0);
-    if (stage !== 'done' && !preview && activeMask) {
+    if (advanced && stage !== 'done' && !preview && activeMask) {
       ctx.save();
       ctx.globalAlpha = 0.4;
       ctx.drawImage(activeMask, 0, 0);
       ctx.restore();
     }
-    if (stage === 'arms' && targets && !preview) {
+    if (advanced && stage === 'arms' && targets && !preview) {
       ctx.save();
       ctx.strokeStyle = '#22c55e';
       ctx.fillStyle = '#22c55e';
@@ -104,7 +105,7 @@ export default function BanzaiPosePage() {
       }
       ctx.restore();
     }
-    if (stage !== 'done' && !preview) {
+    if (advanced && stage !== 'done' && !preview) {
       ctx.font = `bold ${Math.max(14, image.width / 50)}px sans-serif`;
       for (const [name, point] of Object.entries(landmarks)) {
         ctx.fillStyle = '#facc15';
@@ -112,39 +113,84 @@ export default function BanzaiPosePage() {
         ctx.fillText(LABELS[name], point.x + 9, point.y - 9);
       }
     }
-  }, [version, stage, preview, activeImage, activeMask, landmarks, targets?.leftHand.x, targets?.leftHand.y, targets?.rightHand.x, targets?.rightHand.y]);
+  }, [version, stage, preview, advanced, activeImage, activeMask, landmarks, targets?.leftHand.x, targets?.leftHand.y, targets?.rightHand.x, targets?.rightHand.y]);
+
+  async function runAutomatic(image) {
+    const key = entries[provider]?.apiKey;
+    if (!key) {
+      setStage('error');
+      setMessage(`${provider === 'openai' ? 'OpenAI' : 'Gemini'}のAPIキーを設定すると、画像選択後に自動処理を開始します。`);
+      return;
+    }
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setAdvanced(false); setPreview(false); setBusy(true); setStage('analyzing');
+    setMessage('対象人物・両腕・前面の遮蔽物を自動解析しています…');
+    try {
+      const analysis = await analyzePoseWithProvider({ provider, key, image, signal: controller.signal });
+      const plan = createAutomaticPlan(image, analysis);
+      setLandmarks(plan.landmarks); setHandOverrides(plan.targets);
+      occluderRef.current = plan.occluder; armsRef.current = plan.arms;
+      let base = copyCanvas(image);
+
+      if (maskHasPaint(plan.occluder)) {
+        setStage('occluder'); setMessage('前面の遮蔽物を一時的に除去しています…');
+        const cleared = await editWithProvider({
+          provider, key, image: base, selection: plan.occluder, signal: controller.signal,
+          prompt: 'Remove only the foreground person or object inside the transparent mask. Reconstruct the temporarily hidden subject and background in the same camera, perspective, style and lighting. Preserve all unmasked pixels, the lying subject, furniture, framing and aspect ratio.',
+        });
+        base = composeSelected(base, cleared, plan.occluder);
+      }
+
+      setStage('arms'); setMessage('両腕を頭上へまっすぐ伸ばす形に再構築しています…');
+      const guide = makePoseGuide(base, plan.landmarks, plan.targets);
+      const generated = await editWithProvider({
+        provider, key, image: base, selection: plan.arms, guide, signal: controller.signal,
+        prompt: `Edit only the main lying subject's two arms into a fully extended, anatomically natural overhead banzai pose toward their head. The second input is a green pose guide from each shoulder to its target hand; follow it but never render the guide. Keep both elbows straight, reconstruct correct shoulder and underarm anatomy, remove every trace of the old arm pose inside the mask, and preserve face, torso, clothes, other people, camera, composition, aspect ratio and all unmasked pixels.`,
+      });
+      let result = composeSelected(base, generated, plan.arms);
+      if (selectedChangeRatio(base, result, plan.arms) < 0.005) throw new Error('両腕の変化を確認できませんでした');
+      result = restoreOccluder(result, image, plan.occluder);
+      workingRef.current = result;
+      pendingRef.current = null;
+      setStage('done'); setMessage('自動処理が完了しました。前面の遮蔽物は原画像から同じ位置へ復元済みです。');
+      setVersion((v) => v + 1);
+    } catch (error) {
+      setStage('error');
+      setMessage(error.name === 'AbortError' ? '処理を中止しました。' : `自動処理に失敗しました: ${error.message}`);
+    } finally {
+      setBusy(false); abortRef.current = null;
+    }
+  }
+
+  function initializeImage(image) {
+    originalRef.current = image;
+    workingRef.current = copyCanvas(image);
+    occluderRef.current = makeCanvas(image.width, image.height);
+    armsRef.current = makeCanvas(image.width, image.height);
+    pendingRef.current = null;
+    setLandmarks({}); setHandOverrides({}); setPreview(false); setAdvanced(false);
+    setVersion((v) => v + 1);
+    runAutomatic(image);
+  }
 
   const load = useCallback(async (file) => {
     if (!file) return;
     try {
       abortRef.current?.abort();
       const image = await readImage(file);
-      originalRef.current = image;
-      workingRef.current = copyCanvas(image);
-      occluderRef.current = makeCanvas(image.width, image.height);
-      armsRef.current = makeCanvas(image.width, image.height);
-      pendingRef.current = null;
-      setLandmarks({}); setHandOverrides({}); setStage('occluder'); setPreview(false);
-      setMessage('前面人物など、腕に重なる部分を塗ってください。遮蔽物がなければスキップできます。');
-      setVersion((v) => v + 1);
+      initializeImage(image);
     } catch (error) { setMessage(error.message); }
-  }, []);
+  }, [provider, entries]);
 
   // WK画像(ウェルカム画面でチェックした画像)を、通常のファイル読込と同じ扱いで取り込む。
   const loadFromWkDataUrl = useCallback(async (dataUrl) => {
     try {
       abortRef.current?.abort();
       const image = await readImageFromDataUrl(dataUrl);
-      originalRef.current = image;
-      workingRef.current = copyCanvas(image);
-      occluderRef.current = makeCanvas(image.width, image.height);
-      armsRef.current = makeCanvas(image.width, image.height);
-      pendingRef.current = null;
-      setLandmarks({}); setHandOverrides({}); setStage('occluder'); setPreview(false);
-      setMessage('WK画像を読み込みました。前面人物など、腕に重なる部分を塗ってください。');
-      setVersion((v) => v + 1);
+      initializeImage(image);
     } catch (error) { setMessage(error.message); }
-  }, []);
+  }, [provider, entries]);
 
   useWkAutoLoad('/banzai-pose', () => Boolean(originalRef.current), loadFromWkDataUrl);
 
@@ -172,7 +218,7 @@ export default function BanzaiPosePage() {
   };
 
   const pointerDown = (event) => {
-    if (busy || preview || !workingRef.current) return;
+    if (!advanced || busy || preview || !workingRef.current) return;
     event.currentTarget.setPointerCapture(event.pointerId);
     const at = position(event);
     if (pointMode) {
@@ -255,15 +301,28 @@ export default function BanzaiPosePage() {
 
   const revise = () => { pendingRef.current = null; setPreview(false); setVersion((v) => v + 1); };
 
+  const openAdvanced = () => {
+    const image = originalRef.current;
+    if (!image) return;
+    abortRef.current?.abort();
+    workingRef.current = copyCanvas(image);
+    occluderRef.current = makeCanvas(image.width, image.height);
+    armsRef.current = makeCanvas(image.width, image.height);
+    pendingRef.current = null;
+    setLandmarks({}); setHandOverrides({}); setAdvanced(true); setStage('occluder'); setPreview(false);
+    setMessage('詳細調整: 前面人物など、腕に重なる部分だけを塗ってください。遮蔽物がなければスキップできます。');
+    setVersion((v) => v + 1);
+  };
+
   return (
     <div className="h-full overflow-y-auto overscroll-contain text-slate-100">
       <div className="mx-auto max-w-5xl space-y-5 p-4 pb-12">
       <div>
         <h1 className="text-2xl font-bold">BANZAI Pose Pipeline</h1>
-        <p className="mt-1 text-sm text-slate-300">原本保存 → 遮蔽物の一時除去 → 両腕の再構築 → 原本から遮蔽物を復元</p>
+        <p className="mt-1 text-sm text-slate-300">画像を選ぶだけで、人物解析・遮蔽物処理・両腕の再構築・復元まで自動実行します。</p>
       </div>
       <div className="flex flex-wrap items-center gap-3 rounded-xl bg-slate-800 p-4">
-        <label className="cursor-pointer rounded bg-blue-600 px-4 py-2 font-medium">画像を選択
+        <label className="cursor-pointer rounded bg-blue-600 px-4 py-2 font-medium">画像を選んで自動開始
           <input className="hidden" type="file" accept="image/*" onChange={(e) => { load(e.target.files?.[0]); e.target.value = ''; }} />
         </label>
         <label>画像AI <select className="ml-2 rounded bg-slate-700 p-2" value={provider} disabled={busy} onChange={(e) => setProvider(e.target.value)}>
@@ -272,17 +331,30 @@ export default function BanzaiPosePage() {
         <span className="text-sm text-slate-300">キー: {entries[provider]?.apiKey ? '設定済み' : '設定画面で入力してください'}</span>
       </div>
       {originalRef.current && <>
-        <div className="flex flex-wrap gap-2 text-sm">
+        {!advanced && <div className="grid grid-cols-2 gap-2 text-center text-sm sm:grid-cols-4">
+          <span className={`rounded px-3 py-2 ${stage === 'analyzing' ? 'bg-blue-600' : 'bg-slate-700'}`}>1 自動解析</span>
+          <span className={`rounded px-3 py-2 ${stage === 'occluder' ? 'bg-blue-600' : 'bg-slate-700'}`}>2 遮蔽物処理</span>
+          <span className={`rounded px-3 py-2 ${stage === 'arms' ? 'bg-blue-600' : 'bg-slate-700'}`}>3 両腕を生成</span>
+          <span className={`rounded px-3 py-2 ${stage === 'done' ? 'bg-green-700' : 'bg-slate-700'}`}>4 復元・完成</span>
+        </div>}
+        {advanced && <div className="flex flex-wrap gap-2 text-sm">
           <span className={`rounded px-3 py-1 ${stage === 'occluder' ? 'bg-blue-600' : 'bg-slate-700'}`}>1 遮蔽物</span>
           <span className={`rounded px-3 py-1 ${stage === 'arms' ? 'bg-blue-600' : 'bg-slate-700'}`}>2 両腕</span>
           <span className={`rounded px-3 py-1 ${stage === 'done' ? 'bg-green-700' : 'bg-slate-700'}`}>3 復元・検品</span>
-        </div>
+        </div>}
         <p role="status" className="rounded bg-slate-800 p-3 text-sm">{message}</p>
         <canvas ref={canvasRef} onPointerDown={pointerDown} onPointerMove={pointerMove}
           onPointerUp={() => { pointerRef.current = null; }} onPointerCancel={() => { pointerRef.current = null; }}
           className="mx-auto block h-auto max-h-[70vh] max-w-full rounded border border-slate-500"
           style={{ touchAction: 'none' }} aria-label="画像編集キャンバス" />
-        {stage !== 'done' && !preview && <div className="space-y-3 rounded-xl bg-slate-800 p-4">
+        {busy && !advanced && <div className="flex justify-center rounded-xl bg-slate-800 p-4">
+          <button className="rounded bg-slate-600 px-4 py-2" onClick={() => abortRef.current?.abort()}>自動処理を中止</button>
+        </div>}
+        {stage === 'error' && !advanced && <div className="flex flex-wrap gap-2 rounded-xl bg-slate-800 p-4">
+          <button disabled={busy} className="rounded bg-blue-600 px-4 py-2 disabled:opacity-50" onClick={() => runAutomatic(originalRef.current)}>自動処理を再実行</button>
+          <button className="rounded bg-slate-600 px-4 py-2" onClick={openAdvanced}>詳細調整を開く</button>
+        </div>}
+        {advanced && stage !== 'done' && !preview && <div className="space-y-3 rounded-xl bg-slate-800 p-4">
           <div className="flex flex-wrap items-center gap-3">
             <button className={`rounded px-3 py-2 ${mode === 'paint' ? 'bg-rose-600' : 'bg-slate-600'}`} onClick={() => { setMode('paint'); setPointMode(null); }}>範囲を塗る</button>
             <button className={`rounded px-3 py-2 ${mode === 'erase' ? 'bg-rose-600' : 'bg-slate-600'}`} onClick={() => { setMode('erase'); setPointMode(null); }}>塗り消す</button>
@@ -306,16 +378,17 @@ export default function BanzaiPosePage() {
             {stage === 'occluder' && <button className="rounded bg-slate-600 px-4 py-2" onClick={moveToArms}>遮蔽物なしで次へ</button>}
           </div>
         </div>}
-        {preview && <div className="flex flex-wrap gap-2 rounded-xl bg-slate-800 p-4">
+        {advanced && preview && <div className="flex flex-wrap gap-2 rounded-xl bg-slate-800 p-4">
           <button className="rounded bg-green-700 px-4 py-2" onClick={accept}>{stage === 'occluder' ? '確認して両腕の工程へ' : '確認して遮蔽物を復元'}</button>
           <button className="rounded bg-slate-600 px-4 py-2" onClick={revise}>範囲を修正して再実行</button>
           <button className="rounded bg-slate-600 px-4 py-2" onClick={() => download(pendingRef.current, `banzai_${stage}_preview.png`)}>途中画像を保存</button>
         </div>}
         {stage === 'done' && <div className="flex flex-wrap gap-2 rounded-xl bg-slate-800 p-4">
           <button className="rounded bg-green-700 px-4 py-2" onClick={() => download(workingRef.current, 'banzai_result.png')}>完成画像を保存</button>
-          <button className="rounded bg-slate-600 px-4 py-2" onClick={() => { workingRef.current = copyCanvas(originalRef.current); occluderRef.current.getContext('2d').clearRect(0, 0, originalRef.current.width, originalRef.current.height); armsRef.current.getContext('2d').clearRect(0, 0, originalRef.current.width, originalRef.current.height); setLandmarks({}); setHandOverrides({}); setStage('occluder'); setPreview(false); setVersion((v) => v + 1); }}>原本からやり直す</button>
+          {!advanced && <button className="rounded bg-blue-700 px-4 py-2" onClick={() => runAutomatic(originalRef.current)}>同じ原画像でもう一度</button>}
+          <button className="rounded bg-slate-600 px-4 py-2" onClick={openAdvanced}>詳細調整</button>
         </div>}
-        <p className="text-xs text-slate-400">画像は長辺最大2048pxで処理します。APIキーは既存の設定画面から取得し、画像は選択中の画像AIへ送信します。</p>
+        <p className="text-xs text-slate-400">通常は画像選択以外の操作は不要です。画像は長辺最大2048pxで処理し、選択中の画像AIへ送信します。</p>
       </>}
       </div>
     </div>
