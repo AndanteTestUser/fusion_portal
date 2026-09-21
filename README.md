@@ -35,6 +35,7 @@ npm test
 - `/` : ウェルカムページ。`src/tools.js` の内容からメニューを自動生成する
 - `/generator` : AI Image Editor（旧 `index.html` から移植）
 - `/banzai-pose` : BANZAI Pose Pipeline（OpenAIを既定、Geminiを選択可能）
+- `/gemini-canvas` : Gemini Canvas（構図タグ解析・スタイル変換・Before/After比較）
 - `/settings` : APIキー・Vault・WK画像のGAS連携設定画面（ウェルカムページからのみ導線がある）
 
 ### BANZAI Pose Pipeline
