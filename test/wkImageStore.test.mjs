@@ -3,10 +3,9 @@ import assert from 'node:assert/strict';
 import {
   addImageToList,
   removeImageFromList,
-  setCheckedInList,
   setTargetPathInList,
   setPersistedInList,
-  getCheckedForPath,
+  getImageToApply,
   mergeGasImages,
 } from '../src/lib/wkImageStore.js';
 
@@ -15,7 +14,6 @@ const makeImage = (overrides = {}) => ({
   dataUrl: 'data:image/jpeg;base64,AAA',
   filename: 'a.jpg',
   targetPath: null,
-  checked: false,
   persisted: false,
   source: 'upload',
   createdAt: 0,
@@ -35,41 +33,20 @@ test('removeImageFromList removes only the matching id', () => {
   assert.deepEqual(next.map((img) => img.id), ['2']);
 });
 
-test('setCheckedInList enforces one checked image per targetPath', () => {
+test('setTargetPathInList pins an image and evicts a conflicting one back to the pool', () => {
   const list = [
-    makeImage({ id: '1', targetPath: '/generator', checked: true }),
-    makeImage({ id: '2', targetPath: '/generator', checked: false }),
-    makeImage({ id: '3', targetPath: '/banzai-pose', checked: true }),
+    makeImage({ id: '1', targetPath: '/generator' }),
+    makeImage({ id: '2', targetPath: null }),
   ];
-
-  const next = setCheckedInList(list, '2', true);
-  assert.equal(next.find((img) => img.id === '1').checked, false);
-  assert.equal(next.find((img) => img.id === '2').checked, true);
-  // 別のtargetPathのチェック状態には影響しない
-  assert.equal(next.find((img) => img.id === '3').checked, true);
+  const next = setTargetPathInList(list, '2', '/generator');
+  assert.equal(next.find((img) => img.id === '1').targetPath, null);
+  assert.equal(next.find((img) => img.id === '2').targetPath, '/generator');
 });
 
-test('setCheckedInList allows unchecking without affecting others', () => {
-  const list = [makeImage({ id: '1', targetPath: '/generator', checked: true })];
-  const next = setCheckedInList(list, '1', false);
-  assert.equal(next[0].checked, false);
-});
-
-test('setTargetPathInList moves an image and keeps checked state', () => {
-  const list = [makeImage({ id: '1', targetPath: '/generator', checked: true })];
-  const next = setTargetPathInList(list, '1', '/banzai-pose');
-  assert.equal(next[0].targetPath, '/banzai-pose');
-  assert.equal(next[0].checked, true);
-});
-
-test('setTargetPathInList unchecks a conflicting image already checked at the destination', () => {
-  const list = [
-    makeImage({ id: '1', targetPath: '/generator', checked: true }),
-    makeImage({ id: '2', targetPath: '/banzai-pose', checked: true }),
-  ];
-  const next = setTargetPathInList(list, '1', '/banzai-pose');
-  assert.equal(next.find((img) => img.id === '1').checked, true);
-  assert.equal(next.find((img) => img.id === '2').checked, false);
+test('setTargetPathInList with null unpins back to the pool', () => {
+  const list = [makeImage({ id: '1', targetPath: '/generator' })];
+  const next = setTargetPathInList(list, '1', null);
+  assert.equal(next[0].targetPath, null);
 });
 
 test('setPersistedInList toggles only the matching image', () => {
@@ -79,33 +56,46 @@ test('setPersistedInList toggles only the matching image', () => {
   assert.equal(next.find((img) => img.id === '2').persisted, false);
 });
 
-test('getCheckedForPath returns the checked image for a path or null', () => {
+test('getImageToApply prefers an image pinned to the requested path', () => {
   const list = [
-    makeImage({ id: '1', targetPath: '/generator', checked: false }),
-    makeImage({ id: '2', targetPath: '/generator', checked: true }),
+    makeImage({ id: '1', targetPath: null, createdAt: 2 }),
+    makeImage({ id: '2', targetPath: '/generator', createdAt: 1 }),
   ];
-  assert.equal(getCheckedForPath(list, '/generator').id, '2');
-  assert.equal(getCheckedForPath(list, '/banzai-pose'), null);
+  assert.equal(getImageToApply(list, '/generator').id, '2');
 });
 
-test('mergeGasImages adds only new ids and respects per-path exclusivity', () => {
-  const list = [makeImage({ id: '1', targetPath: '/generator', checked: true })];
+test('getImageToApply falls back to the newest pooled (unpinned) image', () => {
+  const list = [
+    makeImage({ id: '1', targetPath: null }),
+    makeImage({ id: '2', targetPath: null }),
+  ];
+  assert.equal(getImageToApply(list, '/banzai-pose').id, '2');
+});
+
+test('getImageToApply returns null when nothing is applicable', () => {
+  const list = [makeImage({ id: '1', targetPath: '/generator' })];
+  assert.equal(getImageToApply(list, '/banzai-pose'), null);
+});
+
+test('mergeGasImages adds only new ids', () => {
+  const list = [makeImage({ id: '1' })];
   const gasImages = [
-    { id: '1', dataUrl: 'dup', targetPath: '/generator', checked: true },
-    { id: '2', dataUrl: 'new', targetPath: '/generator', checked: true },
-    { id: '3', dataUrl: 'new2', targetPath: null, checked: false },
+    { id: '1', dataUrl: 'dup' },
+    { id: '2', dataUrl: 'new', targetPath: null },
   ];
   const next = mergeGasImages(list, gasImages);
-
-  assert.equal(next.length, 3);
-  assert.equal(next.find((img) => img.id === '1').checked, false);
-  assert.equal(next.find((img) => img.id === '2').checked, true);
-  assert.equal(next.find((img) => img.id === '3').targetPath, null);
+  assert.equal(next.length, 2);
 });
 
-test('mergeGasImages ignores checked=true when targetPath is missing', () => {
-  const list = [];
-  const gasImages = [{ id: '1', dataUrl: 'x', targetPath: null, checked: true }];
+test('mergeGasImages pins images that specify a targetPath, evicting conflicts', () => {
+  const list = [makeImage({ id: '1', targetPath: '/generator' })];
+  const gasImages = [{ id: '2', dataUrl: 'new', targetPath: '/generator' }];
   const next = mergeGasImages(list, gasImages);
-  assert.equal(next[0].checked, false);
+  assert.equal(next.find((img) => img.id === '1').targetPath, null);
+  assert.equal(next.find((img) => img.id === '2').targetPath, '/generator');
+});
+
+test('mergeGasImages adds images without targetPath to the pool', () => {
+  const next = mergeGasImages([], [{ id: '1', dataUrl: 'x' }]);
+  assert.equal(next[0].targetPath, null);
 });

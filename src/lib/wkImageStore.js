@@ -6,9 +6,13 @@
 //   - 端末への保存(任意): 画像単位で「永続化」を選んだものだけ、平文のまま
 //     localStorage(fusion_portal_wk_images_persisted)にも書き込む。
 //
-// 1枚のWK画像は基本的に1つの機能ページ(targetPath)に紐づく想定。同じ
-// targetPathに対して「チェック済み」の画像は常に1枚だけになるよう、
-// setCheckedInList が排他制御する。
+// targetPath(nullable)1つだけで状態を表す。「チェック」という別概念は持たない。
+//   - targetPath === null: 特定のページに固定されていない「プール」画像。
+//     次に開いたどの機能ページにも自動的に反映される(通常はこちら)。
+//   - targetPath === "/xxx": そのページ専用に固定された画像(例外的なケース)。
+//     同じページに複数固定することはできず、後から固定した方が優先される
+//     (setTargetPathInList が古い方を自動的にプールへ戻す)。
+// 画像は機能ページへ反映された時点でリストから削除される(使い切り)。
 //
 // GAS(Google Apps Script)中継からの取り込みに関するロジックもここに置く。
 // ネットワークI/Oを伴う fetchGasImages 以外は、ブラウザストレージに依存しない
@@ -41,42 +45,36 @@ export function removeImageFromList(list, id) {
   return list.filter((img) => img.id !== id);
 }
 
-// checked=true にする場合、同じ targetPath を持つ他の画像は自動的に
-// チェックを外す(1機能ページにつき有効な画像は常に1枚だけ)。
-export function setCheckedInList(list, id, checked) {
-  const target = list.find((img) => img.id === id);
-  if (!target) return list;
-
+// targetPath を設定する。null にすればプールへ戻す(固定解除)。
+// 非nullを設定する場合、同じページに既に固定されている他の画像があれば
+// そちらは自動的にプール(null)へ戻す(1ページにつき固定できるのは常に1枚)。
+export function setTargetPathInList(list, id, targetPath) {
   return list.map((img) => {
-    if (img.id === id) return { ...img, checked };
-    if (checked && target.targetPath && img.targetPath === target.targetPath) {
-      return { ...img, checked: false };
-    }
+    if (img.id === id) return { ...img, targetPath };
+    if (targetPath && img.targetPath === targetPath) return { ...img, targetPath: null };
     return img;
   });
-}
-
-// targetPath を変更する。変更後もチェック済みのままなら、移動先の
-// targetPath で既にチェックされている他の画像のチェックを外す。
-export function setTargetPathInList(list, id, targetPath) {
-  const moved = list.map((img) => (img.id === id ? { ...img, targetPath } : img));
-  const target = moved.find((img) => img.id === id);
-  if (!target || !target.checked || !targetPath) return moved;
-
-  return moved.map((img) =>
-    img.id !== id && img.targetPath === targetPath ? { ...img, checked: false } : img
-  );
 }
 
 export function setPersistedInList(list, id, persisted) {
   return list.map((img) => (img.id === id ? { ...img, persisted } : img));
 }
 
-export function getCheckedForPath(list, path) {
-  return list.find((img) => img.targetPath === path && img.checked) || null;
+// 指定したページへ適用すべき画像を1枚選ぶ。
+//   1. そのページに固定(targetPath一致)された画像があればそれを優先
+//   2. なければ、プール(targetPath === null)の中で最も新しいものを使う
+//   3. どちらもなければ null
+export function getImageToApply(list, path) {
+  const pinned = list.find((img) => img.targetPath === path);
+  if (pinned) return pinned;
+
+  const pooled = list.filter((img) => !img.targetPath);
+  return pooled.length > 0 ? pooled[pooled.length - 1] : null;
 }
 
 // GAS から取得した画像を、既存リストへID重複なしで取り込む。
+// targetPath が指定されていればそのページに固定し、同じページに既に
+// 固定されている画像があればプールへ戻す。未指定ならプールに追加される。
 export function mergeGasImages(list, gasImages) {
   const existingIds = new Set(list.map((img) => img.id));
   const additions = gasImages
@@ -86,17 +84,14 @@ export function mergeGasImages(list, gasImages) {
       dataUrl: img.dataUrl,
       filename: img.filename || '',
       targetPath: img.targetPath || null,
-      checked: Boolean(img.checked && img.targetPath),
       persisted: false,
       source: 'gas',
       createdAt: img.createdAt || Date.now(),
     }));
   if (additions.length === 0) return list;
 
-  // GAS由来の画像も、同じ targetPath への重複チェックを避けるため
-  // 1件ずつ setCheckedInList と同じ排他ルールを適用する。
   return additions.reduce(
-    (acc, img) => (img.checked ? setCheckedInList([...acc, img], img.id, true) : [...acc, img]),
+    (acc, img) => (img.targetPath ? setTargetPathInList([...acc, img], img.id, img.targetPath) : [...acc, img]),
     list
   );
 }
@@ -184,8 +179,11 @@ export function saveWkImages(list) {
   }
 }
 
+// autoPoll: バックグラウンドで定期的に取り込むかどうか。そもそも手動の
+// 「今すぐ取り込む」ボタンで足りるケースが多いため、既定はオフにしている。
 export function loadGasConfig() {
-  return safeReadJson(localStorage, GAS_CONFIG_STORAGE_KEY) || { url: '', secret: '' };
+  const stored = safeReadJson(localStorage, GAS_CONFIG_STORAGE_KEY);
+  return { url: '', secret: '', autoPoll: false, ...stored };
 }
 
 export function saveGasConfig(config) {

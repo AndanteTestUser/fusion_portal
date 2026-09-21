@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { tools } from '../tools.js';
 import { providers } from '../providers.js';
@@ -6,8 +6,16 @@ import { useApiKeys } from '../context/ApiKeyContext.jsx';
 import { useWkImages } from '../context/WkImageContext.jsx';
 import { readFileAsDataUrl, resizeImageDataUrl } from '../lib/wkImageStore.js';
 
+function pinnedToolLabel(path) {
+  const tool = tools.find((t) => t.path === path);
+  return tool ? `${tool.icon} ${tool.title}` : path;
+}
+
+// 通常は「次に開いた機能ページへ自動で反映される」プール画像として扱う。
+// 特定のページに固定するのは例外的な操作なので、目立たせすぎないUIにしている。
 function WkImageRow({ image }) {
-  const { setChecked, setTargetPath, setPersisted, removeImage } = useWkImages();
+  const { setTargetPath, setPersisted, removeImage } = useWkImages();
+  const [pinning, setPinning] = useState(false);
 
   return (
     <li className="flex gap-3 rounded-lg bg-neutral-700 p-3">
@@ -17,28 +25,39 @@ function WkImageRow({ image }) {
         className="h-16 w-16 flex-none rounded object-cover"
       />
       <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-        <select
-          className="w-full rounded border border-neutral-600 bg-neutral-900 px-2 py-1 text-xs text-white"
-          value={image.targetPath || ''}
-          onChange={(e) => setTargetPath(image.id, e.target.value || null)}
-        >
-          <option value="">機能ページを選択...</option>
-          {tools.map((tool) => (
-            <option key={tool.path} value={tool.path}>
-              {tool.icon} {tool.title}
-            </option>
-          ))}
-        </select>
+        <p className="text-xs text-neutral-300">
+          {image.targetPath ? `${pinnedToolLabel(image.targetPath)} に固定` : '次に開いた機能ページへ自動で反映されます'}
+        </p>
+
+        {pinning ? (
+          <select
+            className="w-full rounded border border-neutral-600 bg-neutral-900 px-2 py-1 text-xs text-white"
+            value={image.targetPath || ''}
+            onChange={(e) => {
+              setTargetPath(image.id, e.target.value || null);
+              setPinning(false);
+            }}
+            onBlur={() => setPinning(false)}
+            autoFocus
+          >
+            <option value="">固定しない(自動)</option>
+            {tools.map((tool) => (
+              <option key={tool.path} value={tool.path}>
+                {tool.icon} {tool.title}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <button
+            type="button"
+            className="self-start text-[11px] text-neutral-500 underline hover:text-neutral-300"
+            onClick={() => setPinning(true)}
+          >
+            {image.targetPath ? '固定先を変更' : '特定のページに固定する(例外的)'}
+          </button>
+        )}
+
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-neutral-300">
-          <label className="flex items-center gap-1.5">
-            <input
-              type="checkbox"
-              checked={image.checked}
-              disabled={!image.targetPath}
-              onChange={(e) => setChecked(image.id, e.target.checked)}
-            />
-            自動選択する
-          </label>
           <label className="flex items-center gap-1.5">
             <input
               type="checkbox"
@@ -51,7 +70,6 @@ function WkImageRow({ image }) {
             🗑️ 削除
           </button>
         </div>
-        {!image.targetPath && <p className="text-[11px] text-amber-400">機能ページを選ぶとチェックできます</p>}
       </div>
     </li>
   );
@@ -77,13 +95,13 @@ function WkImageSection() {
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-bold text-neutral-300">WK画像</h2>
         {gasConfig.url && gasConfig.secret && (
-          <button type="button" className="btn px-2 py-1 text-xs" onClick={fetchFromGas} disabled={gasStatus.busy}>
+          <button type="button" className="btn px-2 py-1 text-xs" onClick={() => fetchFromGas()} disabled={gasStatus.busy}>
             {gasStatus.busy ? '取り込み中...' : '🔄 GASから取り込む'}
           </button>
         )}
       </div>
       <p className="text-xs text-neutral-400">
-        チェックした画像は、紐づけた機能ページを開いたときに自動で読み込まれます。
+        追加した画像は、次に開いた機能ページへ自動で読み込まれます(特定のページに固定することも可能)。
       </p>
       {gasStatus.message && <p className="text-xs text-amber-400">{gasStatus.message}</p>}
 
