@@ -50,10 +50,10 @@ function WkImageRow({ image }) {
         ) : (
           <button
             type="button"
-            className="self-start text-[11px] text-neutral-500 underline hover:text-neutral-300"
+            className="self-start rounded border border-neutral-500 px-2 py-1 text-xs font-medium text-neutral-200 hover:border-neutral-300 hover:text-white"
             onClick={() => setPinning(true)}
           >
-            {image.targetPath ? '固定先を変更' : '特定のページに固定する(例外的)'}
+            {image.targetPath ? '🔗 固定先を変更' : '🔗 特定のページに固定する(例外的)'}
           </button>
         )}
 
