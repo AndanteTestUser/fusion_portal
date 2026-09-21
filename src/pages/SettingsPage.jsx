@@ -389,6 +389,8 @@ export default function SettingsPage() {
               <p className="text-xs text-neutral-400">方法1: パスフレーズで作成</p>
               <input
                 type="password"
+                autoComplete="new-password"
+                name="vault-new-passphrase"
                 className="rounded border border-neutral-600 bg-neutral-900 px-3 py-2 text-sm text-white"
                 placeholder={`パスフレーズ(${MIN_PASSPHRASE_LENGTH}文字以上)`}
                 value={passphraseInput}
@@ -396,6 +398,8 @@ export default function SettingsPage() {
               />
               <input
                 type="password"
+                autoComplete="new-password"
+                name="vault-new-passphrase-confirm"
                 className="rounded border border-neutral-600 bg-neutral-900 px-3 py-2 text-sm text-white"
                 placeholder="パスフレーズ(確認)"
                 value={passphraseConfirm}
@@ -433,6 +437,8 @@ export default function SettingsPage() {
               <div className="flex gap-2">
                 <input
                   type="password"
+                  autoComplete="current-password"
+                  name="vault-unlock-passphrase"
                   className="min-w-0 flex-1 rounded border border-neutral-600 bg-neutral-900 px-3 py-2 text-sm text-white"
                   placeholder="パスフレーズ"
                   value={unlockPassphraseInput}
@@ -486,6 +492,8 @@ export default function SettingsPage() {
             <div className="flex flex-col gap-2">
               <input
                 type="password"
+                autoComplete="new-password"
+                name="vault-change-passphrase"
                 className="rounded border border-neutral-600 bg-neutral-900 px-3 py-2 text-sm text-white"
                 placeholder={`新しいパスフレーズ(${MIN_PASSPHRASE_LENGTH}文字以上)`}
                 value={passphraseInput}
@@ -493,6 +501,8 @@ export default function SettingsPage() {
               />
               <input
                 type="password"
+                autoComplete="new-password"
+                name="vault-change-passphrase-confirm"
                 className="rounded border border-neutral-600 bg-neutral-900 px-3 py-2 text-sm text-white"
                 placeholder="パスフレーズ(確認)"
                 value={passphraseConfirm}
