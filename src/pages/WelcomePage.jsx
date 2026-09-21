@@ -25,12 +25,12 @@ function WkImageRow({ image }) {
         alt={image.filename || 'WK画像'}
         className="h-24 w-24 flex-none rounded object-cover"
       />
-      <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+      <div className="flex min-w-0 flex-1 flex-col justify-center gap-1.5">
         {image.targetPath && (
           <p className="text-xs text-neutral-300">{pinnedToolLabel(image.targetPath)} に固定中</p>
         )}
 
-        {pinning ? (
+        {pinning && (
           <select
             className="w-full rounded border border-neutral-600 bg-neutral-900 px-2 py-1 text-xs text-white"
             value={image.targetPath || ''}
@@ -48,18 +48,10 @@ function WkImageRow({ image }) {
               </option>
             ))}
           </select>
-        ) : (
-          <button
-            type="button"
-            className="self-start rounded border border-neutral-500 px-2 py-1 text-xs font-medium text-neutral-200 hover:border-neutral-300 hover:text-white"
-            onClick={() => setPinning(true)}
-          >
-            {image.targetPath ? '🔗 固定先を変更' : '🔗 特定のページに固定する'}
-          </button>
         )}
 
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-neutral-300">
-          <label className="flex items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+          <label className="flex items-center gap-1.5 text-neutral-300">
             <input
               type="checkbox"
               checked={image.persisted}
@@ -67,6 +59,11 @@ function WkImageRow({ image }) {
             />
             この端末に残す
           </label>
+          {!pinning && (
+            <button type="button" className="text-sky-400 underline hover:text-sky-300" onClick={() => setPinning(true)}>
+              {image.targetPath ? '固定先を変更' : '固定する'}
+            </button>
+          )}
           <button type="button" className="ml-auto text-red-400 hover:text-red-300" onClick={() => removeImage(image.id)}>
             🗑️ 削除
           </button>
@@ -102,7 +99,7 @@ function WkImageSection() {
         )}
       </div>
       <p className="text-xs text-neutral-400">
-        追加した画像は、次に開いた機能ページへ自動で読み込まれます(特定のページに固定することも可能)。
+        追加した画像は、次にどの機能ページを開いてもそこへ自動的に読み込まれます。特定のページ専用にしたい場合は、各画像の「固定する」から選べます。
       </p>
       {gasStatus.message && <p className="text-xs text-amber-400">{gasStatus.message}</p>}
 
