@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApiKeys } from '../context/ApiKeyContext.jsx';
+import { useWkAutoLoad } from '../hooks/useWkAutoLoad.js';
 
 // 元の index.html（vanilla JS 実装）のロジックをそのまま React に移植したもの。
 // キャンバス上の一時的な描画状態(座標・切り出し済みキャンバスなど)は再描画の
@@ -48,6 +49,16 @@ const readImageFile = (file) =>
       img.src = event.target.result;
     };
     reader.readAsDataURL(file);
+  });
+
+// WK画像(dataURL)からデコードまで確認した上で HTMLImageElement を返す。
+// readImageFile と異なり File ではなく既にdataURL化された画像を受け取る。
+const loadImageElementFromDataUrl = (dataUrl) =>
+  new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('WK画像を読み込めませんでした'));
+    img.src = dataUrl;
   });
 
 // 長辺が MAX_IMAGE_DIMENSION を超える画像は、canvasの描画上限を避けるため
@@ -587,6 +598,35 @@ export default function GeneratorPage() {
     },
     [resetCurrentSelection, showToast]
   );
+
+  // WK画像(ウェルカム画面でチェックした画像)を、通常のファイル読込と同じ
+  // 「①元画像」の位置に読み込む。
+  const applyMainImageFromDataUrl = useCallback(
+    async (dataUrl) => {
+      try {
+        const img = await loadImageElementFromDataUrl(dataUrl);
+        const source = fitWithinMaxDimension(img);
+
+        const canvas = canvasRef.current;
+        canvas.width = source.width;
+        canvas.height = source.height;
+        originalImageRef.current = source;
+        pastEditsRef.current = [];
+        resetCurrentSelection();
+
+        setHistoryOriginal(dataUrl);
+        setHistoryEdited(null);
+        setHistoryGenerated(null);
+
+        showToast('WK画像を読み込みました');
+      } catch (error) {
+        showToast(error.message || 'WK画像を読み込めませんでした');
+      }
+    },
+    [resetCurrentSelection, showToast]
+  );
+
+  useWkAutoLoad('/generator', () => Boolean(originalImageRef.current), applyMainImageFromDataUrl);
 
   const handleUndo = useCallback(() => {
     if (!originalImageRef.current) return;

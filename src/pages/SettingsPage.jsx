@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApiKeys } from '../context/ApiKeyContext.jsx';
+import { useWkImages } from '../context/WkImageContext.jsx';
 import { providers } from '../providers.js';
 import {
   hasVault,
@@ -106,6 +107,59 @@ function ProviderRow({ provider }) {
 
       {note && <p className="text-xs text-amber-400">{note}</p>}
     </div>
+  );
+}
+
+function WkGasSection() {
+  const { gasConfig, saveGasConfig, gasStatus, fetchFromGas } = useWkImages();
+  const [url, setUrl] = useState(gasConfig.url);
+  const [secret, setSecret] = useState(gasConfig.secret);
+
+  const handleSave = useCallback(() => {
+    saveGasConfig({ url: url.trim(), secret: secret.trim() });
+  }, [url, secret, saveGasConfig]);
+
+  return (
+    <section className="flex flex-col gap-3 rounded-lg bg-neutral-800 p-4">
+      <h2 className="text-sm font-bold text-neutral-300">WK画像 (GAS連携)</h2>
+      <p className="text-xs text-neutral-400">
+        iOSの共有シート→ショートカット経由で送られた画像を、Google Apps Script(GAS)の中継Webアプリ経由で
+        自動的に取り込みます。デプロイ方法は <code>gas/README.md</code> を参照してください。
+      </p>
+      <label className="flex flex-col gap-1 text-xs text-neutral-400">
+        <span>GAS Web AppのURL</span>
+        <input
+          type="url"
+          className="rounded border border-neutral-600 bg-neutral-900 px-3 py-2 text-sm text-white"
+          placeholder="https://script.google.com/macros/s/.../exec"
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+        />
+      </label>
+      <label className="flex flex-col gap-1 text-xs text-neutral-400">
+        <span>共有シークレット</span>
+        <input
+          type="password"
+          className="rounded border border-neutral-600 bg-neutral-900 px-3 py-2 text-sm text-white"
+          placeholder="ショートカット側と同じ値"
+          value={secret}
+          onChange={(e) => setSecret(e.target.value)}
+          autoComplete="off"
+        />
+      </label>
+      <div className="flex flex-wrap gap-2">
+        <button type="button" className="btn" onClick={handleSave}>
+          💾 保存
+        </button>
+        <button type="button" className="btn" onClick={fetchFromGas} disabled={gasStatus.busy}>
+          {gasStatus.busy ? '取り込み中...' : '🔄 今すぐ取り込む'}
+        </button>
+      </div>
+      {gasStatus.message && <p className="text-xs text-amber-400">{gasStatus.message}</p>}
+      <p className="text-[11px] text-neutral-500">
+        このURL・シークレットはこの端末にのみ平文で保存されます(APIキーのVaultとは異なり暗号化はしていません)。
+      </p>
+    </section>
   );
 }
 
@@ -300,6 +354,8 @@ export default function SettingsPage() {
           <ProviderRow key={provider.id} provider={provider} />
         ))}
       </section>
+
+      <WkGasSection />
 
       <section className="flex flex-col gap-3 rounded-lg bg-neutral-800 p-4">
         <h2 className="text-sm font-bold text-neutral-300">端末への保存(Vault)</h2>
