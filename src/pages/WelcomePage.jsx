@@ -11,8 +11,9 @@ function pinnedToolLabel(path) {
   return tool ? `${tool.icon} ${tool.title}` : path;
 }
 
-// 通常は「次に開いた機能ページへ自動で反映される」プール画像として扱う。
-// 特定のページに固定するのは例外的な操作なので、目立たせすぎないUIにしている。
+// 「次に開いた機能ページへ自動で反映される」という既定の挙動は WkImageSection
+// 側の説明文で一度だけ伝えているため、ここでは固定されている場合の状態だけを表示する
+// (未固定の画像に毎回同じ説明を繰り返さない)。
 function WkImageRow({ image }) {
   const { setTargetPath, setPersisted, removeImage } = useWkImages();
   const [pinning, setPinning] = useState(false);
@@ -22,14 +23,14 @@ function WkImageRow({ image }) {
       <img
         src={image.dataUrl}
         alt={image.filename || 'WK画像'}
-        className="h-16 w-16 flex-none rounded object-cover"
+        className="h-32 w-32 flex-none rounded object-cover"
       />
-      <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-        <p className="text-xs text-neutral-300">
-          {image.targetPath ? `${pinnedToolLabel(image.targetPath)} に固定` : '次に開いた機能ページへ自動で反映されます'}
-        </p>
+      <div className="flex min-w-0 flex-1 flex-col justify-center gap-1.5">
+        {image.targetPath && (
+          <p className="text-xs text-neutral-300">{pinnedToolLabel(image.targetPath)} に固定中</p>
+        )}
 
-        {pinning ? (
+        {pinning && (
           <select
             className="w-full rounded border border-neutral-600 bg-neutral-900 px-2 py-1 text-xs text-white"
             value={image.targetPath || ''}
@@ -40,33 +41,31 @@ function WkImageRow({ image }) {
             onBlur={() => setPinning(false)}
             autoFocus
           >
-            <option value="">固定しない(自動)</option>
+            <option value="">固定しない</option>
             {tools.map((tool) => (
               <option key={tool.path} value={tool.path}>
                 {tool.icon} {tool.title}
               </option>
             ))}
           </select>
-        ) : (
-          <button
-            type="button"
-            className="self-start text-[11px] text-neutral-500 underline hover:text-neutral-300"
-            onClick={() => setPinning(true)}
-          >
-            {image.targetPath ? '固定先を変更' : '特定のページに固定する(例外的)'}
-          </button>
         )}
 
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-neutral-300">
-          <label className="flex items-center gap-1.5">
-            <input
-              type="checkbox"
-              checked={image.persisted}
-              onChange={(e) => setPersisted(image.id, e.target.checked)}
-            />
-            この端末に残す
-          </label>
-          <button type="button" className="ml-auto text-red-400 hover:text-red-300" onClick={() => removeImage(image.id)}>
+        <label className="flex items-center gap-1.5 text-xs text-neutral-300">
+          <input
+            type="checkbox"
+            checked={image.persisted}
+            onChange={(e) => setPersisted(image.id, e.target.checked)}
+          />
+          この端末に残す
+        </label>
+
+        <div className="flex flex-wrap gap-2">
+          {!pinning && (
+            <button type="button" className="btn px-2 py-1 text-[11px]" onClick={() => setPinning(true)}>
+              🔗 固定する
+            </button>
+          )}
+          <button type="button" className="btn px-2 py-1 text-[11px] text-red-400" onClick={() => removeImage(image.id)}>
             🗑️ 削除
           </button>
         </div>
@@ -101,7 +100,7 @@ function WkImageSection() {
         )}
       </div>
       <p className="text-xs text-neutral-400">
-        追加した画像は、次に開いた機能ページへ自動で読み込まれます(特定のページに固定することも可能)。
+        追加した画像は次に開いたページへ自動的に反映されます。
       </p>
       {gasStatus.message && <p className="text-xs text-amber-400">{gasStatus.message}</p>}
 
