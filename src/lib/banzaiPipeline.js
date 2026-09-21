@@ -1,5 +1,6 @@
 export const DEFAULT_OPENAI_MODEL = 'gpt-image-2.5-sunburst';
 export const DEFAULT_GEMINI_MODEL = 'gemini-3.1-flash-image';
+export const DEFAULT_OPENAI_VISION_MODEL = 'gpt-6-astra';
 
 export function makeCanvas(width, height) {
   const canvas = document.createElement('canvas');
@@ -116,6 +117,138 @@ function canvasToBlob(canvas) {
   return new Promise((resolve, reject) =>
     canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error('PNG変換に失敗しました'))), 'image/png')
   );
+}
+
+const POINT_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  properties: { x: { type: 'number' }, y: { type: 'number' } },
+  required: ['x', 'y'],
+};
+
+const POSE_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  properties: {
+    found: { type: 'boolean' }, confidence: { type: 'number' }, summary: { type: 'string' },
+    head: POINT_SCHEMA, torso: POINT_SCHEMA,
+    leftShoulder: POINT_SCHEMA, rightShoulder: POINT_SCHEMA,
+    leftElbow: POINT_SCHEMA, rightElbow: POINT_SCHEMA,
+    leftWrist: POINT_SCHEMA, rightWrist: POINT_SCHEMA,
+    occluders: {
+      type: 'array', items: {
+        type: 'object', additionalProperties: false,
+        properties: { description: { type: 'string' }, polygon: { type: 'array', items: POINT_SCHEMA } },
+        required: ['description', 'polygon'],
+      },
+    },
+  },
+  required: ['found', 'confidence', 'summary', 'head', 'torso', 'leftShoulder', 'rightShoulder', 'leftElbow', 'rightElbow', 'leftWrist', 'rightWrist', 'occluders'],
+};
+
+function normalizePose(value) {
+  if (!value || typeof value !== 'object') throw new Error('人物解析の結果を読み取れませんでした');
+  const clamp = (n) => Math.max(0, Math.min(1000, Number(n) || 0));
+  const point = (p) => ({ x: clamp(p?.x), y: clamp(p?.y) });
+  const normalized = {
+    found: Boolean(value.found),
+    confidence: Math.max(0, Math.min(1, Number(value.confidence) || 0)),
+    summary: String(value.summary || ''),
+    occluders: Array.isArray(value.occluders) ? value.occluders.map((item) => ({
+      description: String(item?.description || ''),
+      polygon: Array.isArray(item?.polygon) ? item.polygon.map(point) : [],
+    })).filter((item) => item.polygon.length >= 3) : [],
+  };
+  for (const name of ['head', 'torso', 'leftShoulder', 'rightShoulder', 'leftElbow', 'rightElbow', 'leftWrist', 'rightWrist']) normalized[name] = point(value[name]);
+  return normalized;
+}
+
+function openAIOutputText(json) {
+  for (const output of json.output || []) {
+    for (const content of output.content || []) {
+      if (content.type === 'output_text' && content.text) return content.text;
+    }
+  }
+  return json.output_text || '';
+}
+
+export async function analyzePoseWithProvider({ provider, key, image, signal }) {
+  if (!key) throw new Error(`${provider === 'openai' ? 'OpenAI' : 'Gemini'}のAPIキーを設定してください`);
+  const instruction = `Analyze the main reclining or lying person whose arms should be changed to a fully extended overhead banzai pose. Return coordinates normalized from 0 to 1000 relative to the full image. Estimate hidden joints. left/right mean the person's anatomical sides. Identify only foreground people or objects covering this subject or either arm path as occluders, tracing each visible boundary with a tight polygon of 6 to 20 points. Never classify the subject's own body or clothes as an occluder. If no suitable person exists, set found=false. confidence must be 0 to 1.`;
+  const imageDataUrl = image.toDataURL('image/png');
+
+  if (provider === 'openai') {
+    const response = await fetch('https://api.openai.com/v1/responses', {
+      method: 'POST', signal,
+      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: DEFAULT_OPENAI_VISION_MODEL,
+        input: [{ role: 'user', content: [
+          { type: 'input_text', text: instruction },
+          { type: 'input_image', image_url: imageDataUrl, detail: 'high' },
+        ] }],
+        text: { format: { type: 'json_schema', name: 'banzai_pose_analysis', strict: true, schema: POSE_SCHEMA } },
+      }),
+    });
+    if (!response.ok) await responseError(response);
+    const text = openAIOutputText(await response.json());
+    if (!text) throw new Error('OpenAIから人物解析結果が返されませんでした');
+    return normalizePose(JSON.parse(text));
+  }
+
+  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${DEFAULT_GEMINI_MODEL}:generateContent`, {
+    method: 'POST', signal,
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+    body: JSON.stringify({
+      contents: [{ role: 'user', parts: [
+        { text: `${instruction}\nReturn only JSON matching this schema: ${JSON.stringify(POSE_SCHEMA)}` },
+        { inlineData: { mimeType: 'image/png', data: imageDataUrl.split(',')[1] } },
+      ] }],
+      generationConfig: { responseModalities: ['TEXT'], responseMimeType: 'application/json' },
+    }),
+  });
+  if (!response.ok) await responseError(response);
+  const json = await response.json();
+  const text = json.candidates?.[0]?.content?.parts?.find((part) => part.text)?.text;
+  if (!text) throw new Error('Geminiから人物解析結果が返されませんでした');
+  return normalizePose(JSON.parse(text.replace(/^```json\s*|\s*```$/g, '')));
+}
+
+function fromNormalized(point, image) {
+  return { x: point.x * image.width / 1000, y: point.y * image.height / 1000 };
+}
+
+export function createAutomaticPlan(image, analysis) {
+  if (!analysis?.found) throw new Error('横たわっている対象人物を自動検出できませんでした');
+  const landmarks = {};
+  for (const name of ['head', 'torso', 'leftShoulder', 'rightShoulder']) landmarks[name] = fromNormalized(analysis[name], image);
+  const joints = {};
+  for (const name of ['leftElbow', 'rightElbow', 'leftWrist', 'rightWrist']) joints[name] = fromNormalized(analysis[name], image);
+  const estimated = estimateBanzaiTargets(landmarks);
+  if (!estimated) throw new Error('人物の向きと肩幅を解析できませんでした');
+  const margin = Math.max(4, Math.min(image.width, image.height) * 0.015);
+  const fit = ({ x, y }) => ({ x: Math.max(margin, Math.min(image.width - margin, x)), y: Math.max(margin, Math.min(image.height - margin, y)) });
+  const targets = { leftHand: fit(estimated.leftHand), rightHand: fit(estimated.rightHand) };
+  const shoulderWidth = Math.hypot(landmarks.leftShoulder.x - landmarks.rightShoulder.x, landmarks.leftShoulder.y - landmarks.rightShoulder.y);
+  const arms = makeCanvas(image.width, image.height);
+  const armCtx = arms.getContext('2d');
+  armCtx.strokeStyle = 'rgba(255,60,80,1)'; armCtx.fillStyle = 'rgba(255,60,80,1)';
+  armCtx.lineWidth = Math.max(image.width / 35, shoulderWidth * 0.58);
+  armCtx.lineCap = 'round'; armCtx.lineJoin = 'round';
+  for (const side of ['left', 'right']) {
+    const shoulder = landmarks[`${side}Shoulder`];
+    armCtx.beginPath(); armCtx.moveTo(shoulder.x, shoulder.y); armCtx.lineTo(joints[`${side}Elbow`].x, joints[`${side}Elbow`].y); armCtx.lineTo(joints[`${side}Wrist`].x, joints[`${side}Wrist`].y); armCtx.stroke();
+    armCtx.beginPath(); armCtx.moveTo(shoulder.x, shoulder.y); armCtx.lineTo(targets[`${side}Hand`].x, targets[`${side}Hand`].y); armCtx.stroke();
+  }
+  const occluder = makeCanvas(image.width, image.height);
+  const occCtx = occluder.getContext('2d');
+  occCtx.fillStyle = 'rgba(255,60,80,1)';
+  for (const item of analysis.occluders || []) {
+    const polygon = item.polygon.map((point) => fromNormalized(point, image));
+    if (polygon.length < 3) continue;
+    occCtx.beginPath(); occCtx.moveTo(polygon[0].x, polygon[0].y);
+    for (const point of polygon.slice(1)) occCtx.lineTo(point.x, point.y);
+    occCtx.closePath(); occCtx.fill();
+  }
+  return { landmarks, targets, arms, occluder, confidence: analysis.confidence, summary: analysis.summary };
 }
 
 async function responseError(response) {
