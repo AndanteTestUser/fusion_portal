@@ -170,13 +170,48 @@ function openAIOutputText(json) {
   return json.output_text || '';
 }
 
+function analysisImageDataUrl(image) {
+  const maxSide = 1024;
+  const scale = Math.min(1, maxSide / Math.max(image.width, image.height));
+  const resized = makeCanvas(
+    Math.max(1, Math.round(image.width * scale)),
+    Math.max(1, Math.round(image.height * scale)),
+  );
+  resized.getContext('2d').drawImage(image, 0, 0, resized.width, resized.height);
+  return resized.toDataURL('image/jpeg', 0.88);
+}
+
+export function parseStructuredJson(raw) {
+  const text = String(raw || '').trim();
+  if (!text) throw new Error('人物解析の結果が空でした');
+  const unfenced = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+  try { return JSON.parse(unfenced); } catch { /* try the JSON object inside explanatory text */ }
+  const start = unfenced.indexOf('{');
+  const end = unfenced.lastIndexOf('}');
+  if (start >= 0 && end > start) {
+    try { return JSON.parse(unfenced.slice(start, end + 1)); } catch { /* handled below */ }
+  }
+  throw new Error('人物解析のJSONが壊れていました。APIへの再送信はしていません');
+}
+
+async function providerFetch(url, options, label) {
+  try {
+    return await fetch(url, options);
+  } catch (error) {
+    if (error.name === 'AbortError') throw error;
+    throw new Error(`${label}への接続に失敗しました。通信状態を確認して再実行してください`);
+  }
+}
+
 export async function analyzePoseWithProvider({ provider, key, image, signal }) {
   if (!key) throw new Error(`${provider === 'openai' ? 'OpenAI' : 'Gemini'}のAPIキーを設定してください`);
   const instruction = `Analyze the main reclining or lying person whose arms should be changed to a fully extended overhead banzai pose. Return coordinates normalized from 0 to 1000 relative to the full image. Estimate hidden joints. left/right mean the person's anatomical sides. Identify only foreground people or objects covering this subject or either arm path as occluders, tracing each visible boundary with a tight polygon of 6 to 20 points. Never classify the subject's own body or clothes as an occluder. If no suitable person exists, set found=false. confidence must be 0 to 1.`;
-  const imageDataUrl = image.toDataURL('image/png');
+  // Analysis does not need edit-resolution pixels. A smaller JPEG avoids large
+  // base64 request bodies that frequently fail in iOS/Safari.
+  const imageDataUrl = analysisImageDataUrl(image);
 
   if (provider === 'openai') {
-    const response = await fetch('https://api.openai.com/v1/responses', {
+    const response = await providerFetch('https://api.openai.com/v1/responses', {
       method: 'POST', signal,
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -187,29 +222,34 @@ export async function analyzePoseWithProvider({ provider, key, image, signal }) 
         ] }],
         text: { format: { type: 'json_schema', name: 'banzai_pose_analysis', strict: true, schema: POSE_SCHEMA } },
       }),
-    });
+    }, 'OpenAI');
     if (!response.ok) await responseError(response);
     const text = openAIOutputText(await response.json());
     if (!text) throw new Error('OpenAIから人物解析結果が返されませんでした');
-    return normalizePose(JSON.parse(text));
+    return normalizePose(parseStructuredJson(text));
   }
 
-  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${DEFAULT_GEMINI_MODEL}:generateContent`, {
+  const response = await providerFetch(`https://generativelanguage.googleapis.com/v1beta/models/${DEFAULT_GEMINI_MODEL}:generateContent`, {
     method: 'POST', signal,
     headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
     body: JSON.stringify({
       contents: [{ role: 'user', parts: [
-        { text: `${instruction}\nReturn only JSON matching this schema: ${JSON.stringify(POSE_SCHEMA)}` },
-        { inlineData: { mimeType: 'image/png', data: imageDataUrl.split(',')[1] } },
+        { text: instruction },
+        { inlineData: { mimeType: 'image/jpeg', data: imageDataUrl.split(',')[1] } },
       ] }],
-      generationConfig: { responseModalities: ['TEXT'], responseMimeType: 'application/json' },
+      generationConfig: {
+        responseModalities: ['TEXT'],
+        responseMimeType: 'application/json',
+        responseSchema: POSE_SCHEMA,
+        maxOutputTokens: 4096,
+      },
     }),
-  });
+  }, 'Gemini');
   if (!response.ok) await responseError(response);
   const json = await response.json();
-  const text = json.candidates?.[0]?.content?.parts?.find((part) => part.text)?.text;
+  const text = json.candidates?.[0]?.content?.parts?.filter((part) => part.text).map((part) => part.text).join('');
   if (!text) throw new Error('Geminiから人物解析結果が返されませんでした');
-  return normalizePose(JSON.parse(text.replace(/^```json\s*|\s*```$/g, '')));
+  return normalizePose(parseStructuredJson(text));
 }
 
 function fromNormalized(point, image) {
