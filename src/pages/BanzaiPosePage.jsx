@@ -348,7 +348,7 @@ export default function BanzaiPosePage() {
           <p className="mt-1 text-sm text-slate-300">画像を選ぶだけで、人物解析・遮蔽物処理・両腕の再構築・復元まで自動実行します。</p>
         </div>
         <div className="flex flex-wrap items-center gap-3 rounded-xl bg-slate-800 p-4">
-          <label className="cursor-pointer rounded bg-blue-600 px-4 py-2 font-medium">画像を選んで自動開始
+          <label className={`cursor-pointer rounded px-4 py-2 font-medium ${originalRef.current ? 'bg-slate-600' : 'bg-blue-600'}`}>{originalRef.current ? '別の画像に変更' : '画像を選択'}
             <input className="hidden" type="file" accept="image/*" onChange={(e) => { load(e.target.files?.[0]); e.target.value = ''; }} />
           </label>
           <label>画像AI <select className="ml-2 rounded bg-slate-700 p-2" value={provider} disabled={busy} onChange={(e) => setProvider(e.target.value)}>
