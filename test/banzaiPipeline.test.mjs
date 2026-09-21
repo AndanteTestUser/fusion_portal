@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { estimateBanzaiTargets, openAIOutputSize } from '../src/lib/banzaiPipeline.js';
+import { estimateBanzaiTargets, openAIOutputSize, parseStructuredJson } from '../src/lib/banzaiPipeline.js';
 
 test('targets follow the subject head direction rather than the top of the image', () => {
   const points = {
@@ -31,4 +31,16 @@ test('invalid and incomplete landmarks cannot produce a target', () => {
     head: { x: 0, y: 0 }, torso: { x: 0, y: 0 },
     leftShoulder: { x: 1, y: 1 }, rightShoulder: { x: 2, y: 2 },
   }), null);
+});
+
+test('parseStructuredJson accepts fenced JSON', () => {
+  assert.deepEqual(parseStructuredJson('```json\n{"found":true}\n```'), { found: true });
+});
+
+test('parseStructuredJson extracts JSON from explanatory text', () => {
+  assert.deepEqual(parseStructuredJson('Result follows:\n{"found":false}\nDone.'), { found: false });
+});
+
+test('parseStructuredJson reports malformed output without retrying', () => {
+  assert.throws(() => parseStructuredJson('{"found":'), /APIへの再送信はしていません/);
 });
