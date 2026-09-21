@@ -386,6 +386,7 @@ export default function SettingsPage() {
         {vaultState === 'none' && (
           <div className="flex flex-col gap-3">
             <div className="flex flex-col gap-2">
+              <p className="text-xs text-neutral-400">方法1: パスフレーズで作成</p>
               <input
                 type="password"
                 className="rounded border border-neutral-600 bg-neutral-900 px-3 py-2 text-sm text-white"
@@ -399,15 +400,29 @@ export default function SettingsPage() {
                 placeholder="パスフレーズ(確認)"
                 value={passphraseConfirm}
                 onChange={(e) => setPassphraseConfirm(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleCreatePassphraseVault();
+                }}
               />
-              <button type="button" className="btn" onClick={handleCreatePassphraseVault} disabled={vaultBusy}>
-                🔑 パスフレーズでVaultを作成
+              <button
+                type="button"
+                className="btn bg-blue-600 font-bold hover:bg-blue-500"
+                onClick={handleCreatePassphraseVault}
+                disabled={vaultBusy}
+              >
+                🔑 ↑ このパスフレーズでVaultを作成(登録)
               </button>
             </div>
             {isPasskeySupported() && (
-              <button type="button" className="btn" onClick={handleCreatePasskeyVault} disabled={vaultBusy}>
-                👆 パスキーでVaultを作成
-              </button>
+              <>
+                <p className="text-center text-xs text-neutral-500">または</p>
+                <div className="flex flex-col gap-2">
+                  <p className="text-xs text-neutral-400">方法2: パスキーで作成</p>
+                  <button type="button" className="btn" onClick={handleCreatePasskeyVault} disabled={vaultBusy}>
+                    👆 パスキーでVaultを作成
+                  </button>
+                </div>
+              </>
             )}
           </div>
         )}
@@ -422,8 +437,16 @@ export default function SettingsPage() {
                   placeholder="パスフレーズ"
                   value={unlockPassphraseInput}
                   onChange={(e) => setUnlockPassphraseInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleUnlockWithPassphrase();
+                  }}
                 />
-                <button type="button" className="btn" onClick={handleUnlockWithPassphrase} disabled={vaultBusy}>
+                <button
+                  type="button"
+                  className="btn bg-blue-600 font-bold hover:bg-blue-500"
+                  onClick={handleUnlockWithPassphrase}
+                  disabled={vaultBusy}
+                >
                   解錠
                 </button>
               </div>
