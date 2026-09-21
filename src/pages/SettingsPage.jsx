@@ -116,8 +116,17 @@ function WkGasSection() {
   const [secret, setSecret] = useState(gasConfig.secret);
 
   const handleSave = useCallback(() => {
-    saveGasConfig({ url: url.trim(), secret: secret.trim() });
-  }, [url, secret, saveGasConfig]);
+    saveGasConfig({ ...gasConfig, url: url.trim(), secret: secret.trim() });
+  }, [url, secret, gasConfig, saveGasConfig]);
+
+  // チェックボックスはURL・シークレットの未保存の下書きに関わらず、
+  // 保存済みの設定に対してその場で反映する。
+  const handleAutoPollChange = useCallback(
+    (checked) => {
+      saveGasConfig({ ...gasConfig, autoPoll: checked });
+    },
+    [gasConfig, saveGasConfig]
+  );
 
   return (
     <section className="flex flex-col gap-3 rounded-lg bg-neutral-800 p-4">
@@ -147,11 +156,19 @@ function WkGasSection() {
           autoComplete="off"
         />
       </label>
+      <label className="flex items-center gap-2 text-xs text-neutral-300">
+        <input
+          type="checkbox"
+          checked={gasConfig.autoPoll}
+          onChange={(e) => handleAutoPollChange(e.target.checked)}
+        />
+        アプリを開いている間、自動的にバックグラウンドで取り込む(既定はオフ)
+      </label>
       <div className="flex flex-wrap gap-2">
         <button type="button" className="btn" onClick={handleSave}>
           💾 保存
         </button>
-        <button type="button" className="btn" onClick={fetchFromGas} disabled={gasStatus.busy}>
+        <button type="button" className="btn" onClick={() => fetchFromGas()} disabled={gasStatus.busy}>
           {gasStatus.busy ? '取り込み中...' : '🔄 今すぐ取り込む'}
         </button>
       </div>

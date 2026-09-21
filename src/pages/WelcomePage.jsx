@@ -77,7 +77,7 @@ function WkImageSection() {
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-bold text-neutral-300">WK画像</h2>
         {gasConfig.url && gasConfig.secret && (
-          <button type="button" className="btn px-2 py-1 text-xs" onClick={fetchFromGas} disabled={gasStatus.busy}>
+          <button type="button" className="btn px-2 py-1 text-xs" onClick={() => fetchFromGas()} disabled={gasStatus.busy}>
             {gasStatus.busy ? '取り込み中...' : '🔄 GASから取り込む'}
           </button>
         )}

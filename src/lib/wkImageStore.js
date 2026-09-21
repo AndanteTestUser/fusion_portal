@@ -184,8 +184,11 @@ export function saveWkImages(list) {
   }
 }
 
+// autoPoll: バックグラウンドで定期的に取り込むかどうか。そもそも手動の
+// 「今すぐ取り込む」ボタンで足りるケースが多いため、既定はオフにしている。
 export function loadGasConfig() {
-  return safeReadJson(localStorage, GAS_CONFIG_STORAGE_KEY) || { url: '', secret: '' };
+  const stored = safeReadJson(localStorage, GAS_CONFIG_STORAGE_KEY);
+  return { url: '', secret: '', autoPoll: false, ...stored };
 }
 
 export function saveGasConfig(config) {

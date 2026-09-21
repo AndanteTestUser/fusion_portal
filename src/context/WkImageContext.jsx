@@ -16,7 +16,9 @@ import {
 
 // GASへの自動取り込みの間隔。ポーリング先はユーザーがGAS連携を設定した場合のみ
 // 呼ばれるため、未設定であればネットワーク通信は一切発生しない。
-const GAS_POLL_INTERVAL_MS = 20000;
+// 共有直後に即反映させたい場合は手動の「今すぐ取り込む」ボタンを使う想定のため、
+// バックグラウンドポーリングは「押し忘れてもそのうち反映される」程度の頻度で十分。
+const GAS_POLL_INTERVAL_MS = 60000;
 
 const WkImageContext = createContext(null);
 
@@ -95,39 +97,48 @@ export function WkImageProvider({ children }) {
     saveGasConfig(config);
   }, []);
 
-  const fetchFromGas = useCallback(async () => {
-    if (fetchInFlightRef.current) return;
-    if (!gasConfig.url || !gasConfig.secret) return;
-    fetchInFlightRef.current = true;
-    setGasStatus({ busy: true, message: '' });
-    try {
-      const gasImages = await fetchGasImages(gasConfig);
-      setImages((prev) => {
-        const next = mergeGasImages(prev, gasImages);
-        if (next !== prev) saveWkImages(next);
-        return next;
-      });
-      setGasStatus({
-        busy: false,
-        message: gasImages.length > 0 ? `${gasImages.length}件のWK画像を取り込みました` : '新しいWK画像はありませんでした',
-      });
-    } catch (error) {
-      setGasStatus({ busy: false, message: error.message || 'GASからの取得に失敗しました' });
-    } finally {
-      fetchInFlightRef.current = false;
-    }
-  }, [gasConfig]);
+  // silent=true はバックグラウンドポーリング用。「新しい画像はありませんでした」を
+  // 毎回表示すると煩わしいため、何か見つかった時・エラー時以外は状態を更新しない。
+  // 手動ボタン(silent=false)のときは、結果が空でもその旨を表示する。
+  const fetchFromGas = useCallback(
+    async ({ silent = false } = {}) => {
+      if (fetchInFlightRef.current) return;
+      if (!gasConfig.url || !gasConfig.secret) return;
+      fetchInFlightRef.current = true;
+      if (!silent) setGasStatus({ busy: true, message: '' });
+      try {
+        const gasImages = await fetchGasImages(gasConfig);
+        setImages((prev) => {
+          const next = mergeGasImages(prev, gasImages);
+          if (next !== prev) saveWkImages(next);
+          return next;
+        });
+        if (gasImages.length > 0) {
+          setGasStatus({ busy: false, message: `${gasImages.length}件のWK画像を取り込みました` });
+        } else if (!silent) {
+          setGasStatus({ busy: false, message: '新しいWK画像はありませんでした' });
+        } else {
+          setGasStatus((prev) => ({ ...prev, busy: false }));
+        }
+      } catch (error) {
+        setGasStatus({ busy: false, message: error.message || 'GASからの取得に失敗しました' });
+      } finally {
+        fetchInFlightRef.current = false;
+      }
+    },
+    [gasConfig]
+  );
 
-  // GAS連携が設定されている間、アプリを開いている間ずっとバックグラウンドで
-  // ポーリングする。iOS共有シート→ショートカット経由で送られた画像が、
-  // どの画面を開いていても自動的に反映されるようにするため。
+  // GAS連携が設定され、かつ「自動取り込み」がオンの場合だけ、アプリを開いている間
+  // バックグラウンドでポーリングする。既定はオフ(手動の「今すぐ取り込む」ボタンで
+  // 十分なケースが多いため、無駄なリクエストを避ける)。
   useEffect(() => {
-    if (!gasConfig.url || !gasConfig.secret) return undefined;
-    fetchFromGas();
-    const timer = setInterval(fetchFromGas, GAS_POLL_INTERVAL_MS);
+    if (!gasConfig.url || !gasConfig.secret || !gasConfig.autoPoll) return undefined;
+    fetchFromGas({ silent: true });
+    const timer = setInterval(() => fetchFromGas({ silent: true }), GAS_POLL_INTERVAL_MS);
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gasConfig.url, gasConfig.secret]);
+  }, [gasConfig.url, gasConfig.secret, gasConfig.autoPoll]);
 
   const getCheckedImageForPath = useCallback(
     (path) => images.find((img) => img.targetPath === path && img.checked) || null,
