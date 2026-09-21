@@ -10,4 +10,11 @@ export const tools = [
     description: '画像のパーツを切り貼りし、AIで自然に馴染ませます。',
     component: lazy(() => import('./pages/GeneratorPage.jsx')),
   },
+  {
+    path: '/banzai-pose',
+    title: 'BANZAI Pose Pipeline',
+    icon: '🙌',
+    description: '遮蔽を一時的に解き、両腕を頭側へ伸ばして復元します。',
+    component: lazy(() => import('./pages/BanzaiPosePage.jsx')),
+  },
 ];
