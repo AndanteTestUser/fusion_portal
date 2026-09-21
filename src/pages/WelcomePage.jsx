@@ -19,13 +19,13 @@ function WkImageRow({ image }) {
   const [pinning, setPinning] = useState(false);
 
   return (
-    <li className="flex gap-3 rounded-lg bg-neutral-700 p-3">
+    <li className="flex flex-col gap-2 rounded-lg bg-neutral-700 p-3">
       <img
         src={image.dataUrl}
         alt={image.filename || 'WK画像'}
-        className="h-24 w-24 flex-none rounded object-cover"
+        className="h-48 w-full rounded object-cover"
       />
-      <div className="flex min-w-0 flex-1 flex-col justify-center gap-1.5">
+      <div className="flex flex-col gap-1.5">
         {image.targetPath && (
           <p className="text-xs text-neutral-300">{pinnedToolLabel(image.targetPath)} に固定中</p>
         )}
@@ -50,21 +50,22 @@ function WkImageRow({ image }) {
           </select>
         )}
 
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-          <label className="flex items-center gap-1.5 text-neutral-300">
-            <input
-              type="checkbox"
-              checked={image.persisted}
-              onChange={(e) => setPersisted(image.id, e.target.checked)}
-            />
-            この端末に残す
-          </label>
+        <label className="flex items-center gap-1.5 text-xs text-neutral-300">
+          <input
+            type="checkbox"
+            checked={image.persisted}
+            onChange={(e) => setPersisted(image.id, e.target.checked)}
+          />
+          この端末に残す
+        </label>
+
+        <div className="flex flex-wrap gap-2">
           {!pinning && (
-            <button type="button" className="text-sky-400 underline hover:text-sky-300" onClick={() => setPinning(true)}>
-              {image.targetPath ? '固定先を変更' : '固定する'}
+            <button type="button" className="btn px-2 py-1 text-[11px]" onClick={() => setPinning(true)}>
+              🔗 固定する
             </button>
           )}
-          <button type="button" className="ml-auto text-red-400 hover:text-red-300" onClick={() => removeImage(image.id)}>
+          <button type="button" className="btn px-2 py-1 text-[11px] text-red-400" onClick={() => removeImage(image.id)}>
             🗑️ 削除
           </button>
         </div>
@@ -99,7 +100,7 @@ function WkImageSection() {
         )}
       </div>
       <p className="text-xs text-neutral-400">
-        追加した画像は、次にどの機能ページを開いてもそこへ自動的に読み込まれます。特定のページ専用にしたい場合は、各画像の「固定する」から選べます。
+        追加した画像は次に開いたページへ自動的に反映されます。
       </p>
       {gasStatus.message && <p className="text-xs text-amber-400">{gasStatus.message}</p>}
 
