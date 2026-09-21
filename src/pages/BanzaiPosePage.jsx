@@ -73,6 +73,7 @@ export default function BanzaiPosePage() {
   const canvasRef = useRef(null);
   const pointerRef = useRef(null);
   const abortRef = useRef(null);
+  const advancedReturnRef = useRef(null);
 
   const estimated = estimateBanzaiTargets(landmarks);
   const targets = estimated ? { ...estimated, ...handOverrides } : null;
@@ -305,6 +306,11 @@ export default function BanzaiPosePage() {
     const image = originalRef.current;
     if (!image) return;
     abortRef.current?.abort();
+    advancedReturnRef.current = {
+      image: copyCanvas(workingRef.current || image),
+      stage,
+      message,
+    };
     workingRef.current = copyCanvas(image);
     occluderRef.current = makeCanvas(image.width, image.height);
     armsRef.current = makeCanvas(image.width, image.height);
@@ -314,22 +320,43 @@ export default function BanzaiPosePage() {
     setVersion((v) => v + 1);
   };
 
+  const closeAdvanced = () => {
+    abortRef.current?.abort();
+    const previous = advancedReturnRef.current;
+    if (previous) {
+      workingRef.current = previous.image;
+      setStage(previous.stage);
+      setMessage(previous.message);
+    } else {
+      workingRef.current = copyCanvas(originalRef.current);
+      setStage('error');
+      setMessage('詳細調整を終了しました。自動処理を再実行できます。');
+    }
+    pendingRef.current = null;
+    setPreview(false);
+    setAdvanced(false);
+    setPointMode(null);
+    setVersion((v) => v + 1);
+  };
+
   return (
     <div className="h-full overflow-y-auto overscroll-contain text-slate-100">
-      <div className="mx-auto max-w-5xl space-y-5 p-4 pb-12">
-      <div>
-        <h1 className="text-2xl font-bold">BANZAI Pose Pipeline</h1>
-        <p className="mt-1 text-sm text-slate-300">画像を選ぶだけで、人物解析・遮蔽物処理・両腕の再構築・復元まで自動実行します。</p>
-      </div>
-      <div className="flex flex-wrap items-center gap-3 rounded-xl bg-slate-800 p-4">
-        <label className="cursor-pointer rounded bg-blue-600 px-4 py-2 font-medium">画像を選んで自動開始
-          <input className="hidden" type="file" accept="image/*" onChange={(e) => { load(e.target.files?.[0]); e.target.value = ''; }} />
-        </label>
-        <label>画像AI <select className="ml-2 rounded bg-slate-700 p-2" value={provider} disabled={busy} onChange={(e) => setProvider(e.target.value)}>
-          <option value="openai">OpenAI（既定）</option><option value="gemini">Gemini</option>
-        </select></label>
-        <span className="text-sm text-slate-300">キー: {entries[provider]?.apiKey ? '設定済み' : '設定画面で入力してください'}</span>
-      </div>
+      <div className={`mx-auto max-w-5xl ${advanced ? 'space-y-3 p-3 pb-4' : 'space-y-5 p-4 pb-12'}`}>
+      {!advanced && <>
+        <div>
+          <h1 className="text-2xl font-bold">BANZAI Pose Pipeline</h1>
+          <p className="mt-1 text-sm text-slate-300">画像を選ぶだけで、人物解析・遮蔽物処理・両腕の再構築・復元まで自動実行します。</p>
+        </div>
+        <div className="flex flex-wrap items-center gap-3 rounded-xl bg-slate-800 p-4">
+          <label className="cursor-pointer rounded bg-blue-600 px-4 py-2 font-medium">画像を選んで自動開始
+            <input className="hidden" type="file" accept="image/*" onChange={(e) => { load(e.target.files?.[0]); e.target.value = ''; }} />
+          </label>
+          <label>画像AI <select className="ml-2 rounded bg-slate-700 p-2" value={provider} disabled={busy} onChange={(e) => setProvider(e.target.value)}>
+            <option value="openai">OpenAI（既定）</option><option value="gemini">Gemini</option>
+          </select></label>
+          <span className="text-sm text-slate-300">キー: {entries[provider]?.apiKey ? '設定済み' : '設定画面で入力してください'}</span>
+        </div>
+      </>}
       {originalRef.current && <>
         {!advanced && <div className="grid grid-cols-2 gap-2 text-center text-sm sm:grid-cols-4">
           <span className={`rounded px-3 py-2 ${stage === 'analyzing' ? 'bg-blue-600' : 'bg-slate-700'}`}>1 自動解析</span>
@@ -337,15 +364,52 @@ export default function BanzaiPosePage() {
           <span className={`rounded px-3 py-2 ${stage === 'arms' ? 'bg-blue-600' : 'bg-slate-700'}`}>3 両腕を生成</span>
           <span className={`rounded px-3 py-2 ${stage === 'done' ? 'bg-green-700' : 'bg-slate-700'}`}>4 復元・完成</span>
         </div>}
-        {advanced && <div className="flex flex-wrap gap-2 text-sm">
-          <span className={`rounded px-3 py-1 ${stage === 'occluder' ? 'bg-blue-600' : 'bg-slate-700'}`}>1 遮蔽物</span>
-          <span className={`rounded px-3 py-1 ${stage === 'arms' ? 'bg-blue-600' : 'bg-slate-700'}`}>2 両腕</span>
-          <span className={`rounded px-3 py-1 ${stage === 'done' ? 'bg-green-700' : 'bg-slate-700'}`}>3 復元・検品</span>
+        {advanced && <>
+          <div className="flex items-center justify-between gap-3 rounded-xl bg-slate-800 p-3">
+            <button className="shrink-0 rounded bg-slate-600 px-3 py-2 font-medium" onClick={closeAdvanced}>← 通常画面へ戻る</button>
+            <div className="min-w-0 text-right">
+              <h2 className="font-semibold">詳細調整</h2>
+              <p className="truncate text-xs text-slate-300">自動結果は保持されています</p>
+            </div>
+          </div>
+          <div className="grid grid-cols-3 gap-2 text-center text-xs sm:text-sm">
+            <span className={`rounded px-2 py-2 ${stage === 'occluder' ? 'bg-blue-600' : 'bg-slate-700'}`}>1 遮蔽物を指定</span>
+            <span className={`rounded px-2 py-2 ${stage === 'arms' ? 'bg-blue-600' : 'bg-slate-700'}`}>2 腕を指定</span>
+            <span className={`rounded px-2 py-2 ${stage === 'done' ? 'bg-green-700' : 'bg-slate-700'}`}>3 確認・保存</span>
+          </div>
+        </>}
+        <p role="status" className={`rounded p-3 text-sm ${advanced ? 'border border-blue-700 bg-blue-950' : 'bg-slate-800'}`}>{message}</p>
+        {advanced && stage !== 'done' && !preview && <div className="space-y-3 rounded-xl bg-slate-800 p-3">
+          <div>
+            <p className="font-semibold">{stage === 'occluder' ? '画像上で、手前に重なる人物・物だけを塗る' : '画像上で、元の両腕と新しい両腕の範囲を塗る'}</p>
+            <p className="mt-1 text-xs text-slate-300">赤い部分だけがAIの編集対象です。間違えた箇所は「赤い塗りを消す」で戻せます。</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button aria-pressed={mode === 'paint'} className={`rounded px-3 py-2 ${mode === 'paint' ? 'bg-rose-600' : 'bg-slate-600'}`} onClick={() => { setMode('paint'); setPointMode(null); }}>＋ 編集範囲を赤く塗る</button>
+            <button aria-pressed={mode === 'erase'} className={`rounded px-3 py-2 ${mode === 'erase' ? 'bg-rose-600' : 'bg-slate-600'}`} onClick={() => { setMode('erase'); setPointMode(null); }}>－ 赤い塗りを消す</button>
+            <label className="flex items-center gap-2 text-sm">太さ <input aria-label="ブラシの太さ" type="range" min="8" max="100" value={brush} onChange={(e) => setBrush(Number(e.target.value))} /></label>
+            <button className="rounded bg-slate-600 px-3 py-2" onClick={() => { activeMask.getContext('2d').clearRect(0, 0, activeMask.width, activeMask.height); setVersion((v) => v + 1); }}>赤い塗りを全部消す</button>
+          </div>
+          {stage === 'arms' && <div className="space-y-2 border-t border-slate-600 pt-3">
+            <p className="text-sm font-semibold">位置指定：ボタンを押してから、画像上の該当位置を1回タップ</p>
+            <div className="flex flex-wrap gap-2">{LANDMARKS.map((name, index) => <button key={name}
+              className={`rounded px-3 py-2 ${pointMode === name ? 'bg-amber-600' : 'bg-slate-600'}`}
+              onClick={() => setPointMode(name)}>{index + 1}. {LABELS[name]}{landmarks[name] ? ' ✓' : ''}</button>)}</div>
+            {targets && <div className="flex flex-wrap gap-2">{['leftHand', 'rightHand'].map((name) => <button key={name}
+              className={`rounded px-3 py-2 ${pointMode === name ? 'bg-amber-600' : 'bg-slate-600'}`}
+              onClick={() => setPointMode(name)}>{LABELS[name]}を直す{handOverrides[name] ? ' ✓' : ''}</button>)}
+              {Object.keys(handOverrides).length > 0 && <button className="rounded bg-slate-600 px-3 py-2" onClick={() => setHandOverrides({})}>手先を自動位置に戻す</button>}</div>}
+            <button className="rounded bg-emerald-700 px-3 py-2" onClick={addTargetCorridors}>緑線に沿う腕の範囲を自動で塗る</button>
+          </div>}
+          <div className="flex flex-wrap gap-2 border-t border-slate-600 pt-3">
+            <button disabled={busy} className="rounded bg-blue-600 px-4 py-2 font-medium disabled:opacity-50" onClick={run}>{stage === 'occluder' ? '塗った遮蔽物を一時除去' : '塗った範囲に両腕を生成'}</button>
+            {busy && <button className="rounded bg-slate-600 px-4 py-2" onClick={() => abortRef.current?.abort()}>処理を中止</button>}
+            {stage === 'occluder' && <button className="rounded bg-slate-600 px-4 py-2" onClick={moveToArms}>遮蔽物はない → 腕の調整へ</button>}
+          </div>
         </div>}
-        <p role="status" className="rounded bg-slate-800 p-3 text-sm">{message}</p>
         <canvas ref={canvasRef} onPointerDown={pointerDown} onPointerMove={pointerMove}
           onPointerUp={() => { pointerRef.current = null; }} onPointerCancel={() => { pointerRef.current = null; }}
-          className="mx-auto block h-auto max-h-[70vh] max-w-full rounded border border-slate-500"
+          className={`mx-auto block h-auto max-w-full rounded border border-slate-500 ${advanced ? 'max-h-[52dvh]' : 'max-h-[70vh]'}`}
           style={{ touchAction: 'none' }} aria-label="画像編集キャンバス" />
         {busy && !advanced && <div className="flex justify-center rounded-xl bg-slate-800 p-4">
           <button className="rounded bg-slate-600 px-4 py-2" onClick={() => abortRef.current?.abort()}>自動処理を中止</button>
@@ -353,30 +417,6 @@ export default function BanzaiPosePage() {
         {stage === 'error' && !advanced && <div className="flex flex-wrap gap-2 rounded-xl bg-slate-800 p-4">
           <button disabled={busy} className="rounded bg-blue-600 px-4 py-2 disabled:opacity-50" onClick={() => runAutomatic(originalRef.current)}>自動処理を再実行</button>
           <button className="rounded bg-slate-600 px-4 py-2" onClick={openAdvanced}>詳細調整を開く</button>
-        </div>}
-        {advanced && stage !== 'done' && !preview && <div className="space-y-3 rounded-xl bg-slate-800 p-4">
-          <div className="flex flex-wrap items-center gap-3">
-            <button className={`rounded px-3 py-2 ${mode === 'paint' ? 'bg-rose-600' : 'bg-slate-600'}`} onClick={() => { setMode('paint'); setPointMode(null); }}>範囲を塗る</button>
-            <button className={`rounded px-3 py-2 ${mode === 'erase' ? 'bg-rose-600' : 'bg-slate-600'}`} onClick={() => { setMode('erase'); setPointMode(null); }}>塗り消す</button>
-            <label>ブラシ幅 <input type="range" min="8" max="100" value={brush} onChange={(e) => setBrush(Number(e.target.value))} /></label>
-            <button className="rounded bg-slate-600 px-3 py-2" onClick={() => { activeMask.getContext('2d').clearRect(0, 0, activeMask.width, activeMask.height); setVersion((v) => v + 1); }}>範囲をクリア</button>
-          </div>
-          {stage === 'arms' && <>
-            <div className="flex flex-wrap gap-2">{LANDMARKS.map((name) => <button key={name}
-              className={`rounded px-3 py-2 ${pointMode === name ? 'bg-amber-600' : 'bg-slate-600'}`}
-              onClick={() => setPointMode(name)}>{LABELS[name]}{landmarks[name] ? ' ✓' : ''}</button>)}</div>
-            {targets && <div className="flex flex-wrap gap-2">{['leftHand', 'rightHand'].map((name) => <button key={name}
-              className={`rounded px-3 py-2 ${pointMode === name ? 'bg-amber-600' : 'bg-slate-600'}`}
-              onClick={() => setPointMode(name)}>{LABELS[name]}を修正{handOverrides[name] ? ' ✓' : ''}</button>)}
-              {Object.keys(handOverrides).length > 0 && <button className="rounded bg-slate-600 px-3 py-2" onClick={() => setHandOverrides({})}>手先を自動位置に戻す</button>}</div>}
-            <p className="text-sm text-slate-300">各ボタンを押し、画像上の位置をタップ。緑線は姿勢の目安です。元の腕も含めて編集領域を塗ってください。</p>
-            <button className="rounded bg-emerald-700 px-3 py-2" onClick={addTargetCorridors}>目標の腕の範囲を追加</button>
-          </>}
-          <div className="flex flex-wrap gap-2">
-            <button disabled={busy} className="rounded bg-blue-600 px-4 py-2 disabled:opacity-50" onClick={run}>{stage === 'occluder' ? '遮蔽物を一時除去' : '両腕を生成'}</button>
-            {busy && <button className="rounded bg-slate-600 px-4 py-2" onClick={() => abortRef.current?.abort()}>中止</button>}
-            {stage === 'occluder' && <button className="rounded bg-slate-600 px-4 py-2" onClick={moveToArms}>遮蔽物なしで次へ</button>}
-          </div>
         </div>}
         {advanced && preview && <div className="flex flex-wrap gap-2 rounded-xl bg-slate-800 p-4">
           <button className="rounded bg-green-700 px-4 py-2" onClick={accept}>{stage === 'occluder' ? '確認して両腕の工程へ' : '確認して遮蔽物を復元'}</button>
@@ -386,9 +426,10 @@ export default function BanzaiPosePage() {
         {stage === 'done' && <div className="flex flex-wrap gap-2 rounded-xl bg-slate-800 p-4">
           <button className="rounded bg-green-700 px-4 py-2" onClick={() => download(workingRef.current, 'banzai_result.png')}>完成画像を保存</button>
           {!advanced && <button className="rounded bg-blue-700 px-4 py-2" onClick={() => runAutomatic(originalRef.current)}>同じ原画像でもう一度</button>}
-          <button className="rounded bg-slate-600 px-4 py-2" onClick={openAdvanced}>詳細調整</button>
+          {!advanced && <button className="rounded bg-slate-600 px-4 py-2" onClick={openAdvanced}>詳細調整</button>}
+          {advanced && <button className="rounded bg-slate-600 px-4 py-2" onClick={closeAdvanced}>調整を終了して通常画面へ</button>}
         </div>}
-        <p className="text-xs text-slate-400">通常は画像選択以外の操作は不要です。画像は長辺最大2048pxで処理し、選択中の画像AIへ送信します。</p>
+        {!advanced && <p className="text-xs text-slate-400">通常は画像選択以外の操作は不要です。画像は長辺最大2048pxで処理し、選択中の画像AIへ送信します。</p>}
       </>}
       </div>
     </div>
