@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApiKeys } from '../context/ApiKeyContext.jsx';
+import { useWkAutoLoad } from '../hooks/useWkAutoLoad.js';
 import {
   composeSelected, copyCanvas, editWithProvider, estimateBanzaiTargets, makePoseGuide,
   makeCanvas, maskHasPaint, restoreOccluder, selectedChangeRatio,
@@ -16,6 +17,13 @@ function download(canvas, name) {
   a.click();
 }
 
+async function decodeImageToCanvas(image) {
+  const ratio = Math.min(1, MAX_SIDE / Math.max(image.naturalWidth, image.naturalHeight));
+  const canvas = makeCanvas(Math.round(image.naturalWidth * ratio), Math.round(image.naturalHeight * ratio));
+  canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
+  return canvas;
+}
+
 async function readImage(file) {
   const url = URL.createObjectURL(file);
   try {
@@ -25,13 +33,22 @@ async function readImage(file) {
       image.onerror = () => reject(new Error('画像を読み込めませんでした'));
       image.src = url;
     });
-    const ratio = Math.min(1, MAX_SIDE / Math.max(image.naturalWidth, image.naturalHeight));
-    const canvas = makeCanvas(Math.round(image.naturalWidth * ratio), Math.round(image.naturalHeight * ratio));
-    canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
-    return canvas;
+    return await decodeImageToCanvas(image);
   } finally {
     URL.revokeObjectURL(url);
   }
+}
+
+// WK画像(既にdataURL化された画像)から読み込む。readImage と異なり
+// Fileではないため object URL の生成・破棄は不要。
+async function readImageFromDataUrl(dataUrl) {
+  const image = new Image();
+  await new Promise((resolve, reject) => {
+    image.onload = resolve;
+    image.onerror = () => reject(new Error('WK画像を読み込めませんでした'));
+    image.src = dataUrl;
+  });
+  return decodeImageToCanvas(image);
 }
 
 export default function BanzaiPosePage() {
@@ -112,6 +129,24 @@ export default function BanzaiPosePage() {
       setVersion((v) => v + 1);
     } catch (error) { setMessage(error.message); }
   }, []);
+
+  // WK画像(ウェルカム画面でチェックした画像)を、通常のファイル読込と同じ扱いで取り込む。
+  const loadFromWkDataUrl = useCallback(async (dataUrl) => {
+    try {
+      abortRef.current?.abort();
+      const image = await readImageFromDataUrl(dataUrl);
+      originalRef.current = image;
+      workingRef.current = copyCanvas(image);
+      occluderRef.current = makeCanvas(image.width, image.height);
+      armsRef.current = makeCanvas(image.width, image.height);
+      pendingRef.current = null;
+      setLandmarks({}); setHandOverrides({}); setStage('occluder'); setPreview(false);
+      setMessage('WK画像を読み込みました。前面人物など、腕に重なる部分を塗ってください。');
+      setVersion((v) => v + 1);
+    } catch (error) { setMessage(error.message); }
+  }, []);
+
+  useWkAutoLoad('/banzai-pose', () => Boolean(originalRef.current), loadFromWkDataUrl);
 
   const position = (event) => {
     const rect = canvasRef.current.getBoundingClientRect();
