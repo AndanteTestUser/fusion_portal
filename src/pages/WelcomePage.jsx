@@ -19,13 +19,13 @@ function WkImageRow({ image }) {
   const [pinning, setPinning] = useState(false);
 
   return (
-    <li className="flex flex-col gap-2 rounded-lg bg-neutral-700 p-3">
+    <li className="flex gap-3 rounded-lg bg-neutral-700 p-3">
       <img
         src={image.dataUrl}
         alt={image.filename || 'WK画像'}
-        className="h-48 w-full rounded object-cover"
+        className="h-32 w-32 flex-none rounded object-cover"
       />
-      <div className="flex flex-col gap-1.5">
+      <div className="flex min-w-0 flex-1 flex-col justify-center gap-1.5">
         {image.targetPath && (
           <p className="text-xs text-neutral-300">{pinnedToolLabel(image.targetPath)} に固定中</p>
         )}
