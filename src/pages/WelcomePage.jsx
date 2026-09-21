@@ -11,8 +11,9 @@ function pinnedToolLabel(path) {
   return tool ? `${tool.icon} ${tool.title}` : path;
 }
 
-// 通常は「次に開いた機能ページへ自動で反映される」プール画像として扱う。
-// 特定のページに固定するのは例外的な操作なので、目立たせすぎないUIにしている。
+// 「次に開いた機能ページへ自動で反映される」という既定の挙動は WkImageSection
+// 側の説明文で一度だけ伝えているため、ここでは固定されている場合の状態だけを表示する
+// (未固定の画像に毎回同じ説明を繰り返さない)。
 function WkImageRow({ image }) {
   const { setTargetPath, setPersisted, removeImage } = useWkImages();
   const [pinning, setPinning] = useState(false);
@@ -22,12 +23,12 @@ function WkImageRow({ image }) {
       <img
         src={image.dataUrl}
         alt={image.filename || 'WK画像'}
-        className="h-16 w-16 flex-none rounded object-cover"
+        className="h-24 w-24 flex-none rounded object-cover"
       />
       <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-        <p className="text-xs text-neutral-300">
-          {image.targetPath ? `${pinnedToolLabel(image.targetPath)} に固定` : '次に開いた機能ページへ自動で反映されます'}
-        </p>
+        {image.targetPath && (
+          <p className="text-xs text-neutral-300">{pinnedToolLabel(image.targetPath)} に固定中</p>
+        )}
 
         {pinning ? (
           <select
@@ -40,7 +41,7 @@ function WkImageRow({ image }) {
             onBlur={() => setPinning(false)}
             autoFocus
           >
-            <option value="">固定しない(自動)</option>
+            <option value="">固定しない</option>
             {tools.map((tool) => (
               <option key={tool.path} value={tool.path}>
                 {tool.icon} {tool.title}
@@ -53,7 +54,7 @@ function WkImageRow({ image }) {
             className="self-start rounded border border-neutral-500 px-2 py-1 text-xs font-medium text-neutral-200 hover:border-neutral-300 hover:text-white"
             onClick={() => setPinning(true)}
           >
-            {image.targetPath ? '🔗 固定先を変更' : '🔗 特定のページに固定する(例外的)'}
+            {image.targetPath ? '🔗 固定先を変更' : '🔗 特定のページに固定する'}
           </button>
         )}
 
