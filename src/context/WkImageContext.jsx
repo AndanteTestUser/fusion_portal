@@ -129,12 +129,31 @@ export function WkImageProvider({ children }) {
     [gasConfig]
   );
 
-  // GAS連携が設定され、かつ「自動取り込み」がオンの場合だけ、アプリを開いている間
-  // バックグラウンドでポーリングする。既定はオフ(手動の「今すぐ取り込む」ボタンで
-  // 十分なケースが多いため、無駄なリクエストを避ける)。
+  // ショートカット実行後にアプリを開き直す(または既に開いていたアプリの前面に
+  // 戻ってくる)運用を主なトリガーとして想定し、GAS連携が設定されていれば
+  // 「表示された瞬間」に1回だけ取り込みを試みる。ポーリングではないため、
+  // 無駄なリクエストは発生しない。
+  useEffect(() => {
+    if (!gasConfig.url || !gasConfig.secret) return undefined;
+
+    fetchFromGas({ silent: true });
+
+    const handleVisible = () => {
+      if (document.visibilityState === 'visible') fetchFromGas({ silent: true });
+    };
+    document.addEventListener('visibilitychange', handleVisible);
+    window.addEventListener('focus', handleVisible);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisible);
+      window.removeEventListener('focus', handleVisible);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gasConfig.url, gasConfig.secret]);
+
+  // 上記の「開いた瞬間」トリガーとは別に、アプリを開きっぱなしの間も一定間隔で
+  // 取り込みたい場合だけ追加でポーリングする(既定はオフ)。
   useEffect(() => {
     if (!gasConfig.url || !gasConfig.secret || !gasConfig.autoPoll) return undefined;
-    fetchFromGas({ silent: true });
     const timer = setInterval(() => fetchFromGas({ silent: true }), GAS_POLL_INTERVAL_MS);
     return () => clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
