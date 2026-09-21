@@ -12,7 +12,22 @@ import {
   setPersistedInList,
   getImageToApply,
   generateImageId,
+  resizeImageDataUrl,
 } from '../lib/wkImageStore.js';
+
+// GASから届いた画像を、手動アップロード(WelcomePageのhandleUpload)と同じく
+// 保存前に縮小する。iOSショートカット経由の写真はフル解像度のままだと
+// sessionStorage/localStorageの容量上限を超えて保存に静かに失敗しうる上、
+// GAS側は取得(GET)と同時にDriveから削除(consume)してしまうため、ここで
+// 縮小に失敗しても元画像そのものは失わないようフォールバックする。
+async function resizeGasImage(image) {
+  try {
+    const dataUrl = await resizeImageDataUrl(image.dataUrl);
+    return { ...image, dataUrl };
+  } catch (e) {
+    return image;
+  }
+}
 
 // GASへの自動取り込み(ポーリング)の間隔。既定はオフで、設定画面で明示的に
 // オンにした場合のみ動作する(オンにする場合はアプリを開きっぱなしで共有する
@@ -99,8 +114,9 @@ export function WkImageProvider({ children }) {
       if (!silent) setGasStatus({ busy: true, message: '' });
       try {
         const gasImages = await fetchGasImages(gasConfig);
+        const resizedGasImages = await Promise.all(gasImages.map(resizeGasImage));
         setImages((prev) => {
-          const next = mergeGasImages(prev, gasImages);
+          const next = mergeGasImages(prev, resizedGasImages);
           if (next !== prev) saveWkImages(next);
           return next;
         });
