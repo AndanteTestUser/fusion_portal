@@ -4,6 +4,7 @@ import { useWkAutoLoad } from '../hooks/useWkAutoLoad.js';
 import {
   analyzePoseWithProvider, composeSelected, copyCanvas, createAutomaticPlan, editWithProvider,
   estimateBanzaiTargets, makePoseGuide, makeCanvas, maskHasPaint, restoreOccluder, selectedChangeRatio,
+  verifyArmsRendered,
 } from '../lib/banzaiPipeline.js';
 
 const LANDMARKS = ['head', 'torso', 'leftShoulder', 'rightShoulder'];
@@ -187,6 +188,9 @@ export default function BanzaiPosePage() {
       });
       let result = composeSelected(base, generated, plan.arms);
       if (selectedChangeRatio(base, result, plan.arms) < 0.005) throw new Error('両腕の変化を確認できませんでした');
+      setMessage('生成された両腕を確認しています…');
+      const armCheck = await verifyArmsRendered({ provider, key, image: result, signal: controller.signal });
+      if (!armCheck.ok) throw new Error(`両腕が正しく生成されませんでした: ${armCheck.reason}`);
       result = restoreOccluder(result, image, plan.occluder, plan.armsOldRegion);
       workingRef.current = result;
       pendingRef.current = null;
@@ -372,6 +376,14 @@ export default function BanzaiPosePage() {
       if (selectedChangeRatio(workingRef.current, pendingRef.current, selected) < 0.005) {
         pendingRef.current = null;
         throw new Error('指定範囲の変化が確認できません。範囲を見直して再実行してください');
+      }
+      if (stage === 'arms') {
+        setMessage('生成された両腕を確認しています…');
+        const armCheck = await verifyArmsRendered({ provider, key, image: pendingRef.current, signal: controller.signal });
+        if (!armCheck.ok) {
+          pendingRef.current = null;
+          throw new Error(`両腕が正しく生成されませんでした: ${armCheck.reason}`);
+        }
       }
       setPreview(true);
       setMessage('プレビューを確認してください。問題があれば編集範囲を直して同じ工程を再実行できます。');
