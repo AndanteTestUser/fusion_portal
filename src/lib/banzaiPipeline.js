@@ -381,27 +381,37 @@ function fromNormalized(point, image) {
   return { x: point.x * image.width / 1000, y: point.y * image.height / 1000 };
 }
 
-// Paints one side's armsOldRegion contribution. Prefers the AI-traced visible
-// outline (accurate to the actual photo, whatever the joint estimates say);
-// falls back to the old decreed shoulder-elbow-wrist stroke + wrist circle
-// only when no usable polygon came back (e.g. that arm was fully occluded).
+// Paints one side's armsOldRegion contribution.
+//
+// Always draws the full shoulder-elbow-wrist geometric path + wrist circle,
+// unconditionally, regardless of whether an AI-traced polygon is available —
+// this is the same baseline the pipeline used before visibleArms existed,
+// and it covers the WHOLE joint chain, not one specific joint. A per-joint
+// "use the polygon here, fall back to geometry there" branch is exactly the
+// kind of fragile, image-specific patch BANZAI_KNOWN_ISSUES.md already warns
+// against: whichever joint happens to be the one an AI polygon falls short
+// at varies photo to photo, so hand-picking one joint to hard-guarantee (as
+// an earlier version of this function did, for the shoulder specifically)
+// just moves the same ghosting bug to the next joint on the next image.
+//
+// The AI-traced polygon, when available, is layered ON TOP of that
+// unconditional baseline — pure addition, never a replacement — for the
+// extra precision a straight-line approximation can't give (actual sleeve
+// bulge, finger spread, etc.). Because it only adds coverage, it can never
+// reopen a gap the geometric baseline already closed, anywhere along the arm.
 // ctx must already have fillStyle/strokeStyle/lineWidth/lineCap/lineJoin set
 // by the caller.
 export function paintOldArmRegion(ctx, { polygon, shoulder, elbow, wrist, oldWristRadius }) {
+  ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(elbow.x, elbow.y); ctx.lineTo(wrist.x, wrist.y); ctx.stroke();
+  ctx.beginPath(); ctx.arc(wrist.x, wrist.y, oldWristRadius, 0, Math.PI * 2); ctx.fill();
   if (polygon && polygon.length >= 3) {
     ctx.beginPath();
     ctx.moveTo(polygon[0].x, polygon[0].y);
     for (const point of polygon.slice(1)) ctx.lineTo(point.x, point.y);
     ctx.closePath();
     ctx.fill();
-    // Stroking the same path adds a small buffer for the AI polygon's own
-    // boundary imprecision, same role the wrist circle plays for the
-    // geometric fallback below.
     ctx.stroke();
-    return;
   }
-  ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(elbow.x, elbow.y); ctx.lineTo(wrist.x, wrist.y); ctx.stroke();
-  ctx.beginPath(); ctx.arc(wrist.x, wrist.y, oldWristRadius, 0, Math.PI * 2); ctx.fill();
 }
 
 export function createAutomaticPlan(image, analysis) {
