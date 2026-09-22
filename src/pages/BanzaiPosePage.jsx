@@ -183,7 +183,7 @@ export default function BanzaiPosePage() {
       });
       let result = composeSelected(base, generated, plan.arms);
       if (selectedChangeRatio(base, result, plan.arms) < 0.005) throw new Error('両腕の変化を確認できませんでした');
-      result = restoreOccluder(result, image, plan.occluder);
+      result = restoreOccluder(result, image, plan.occluder, plan.arms);
       workingRef.current = result;
       pendingRef.current = null;
       setStage('done'); setMessage('自動処理が完了しました。前面の遮蔽物は原画像から同じ位置へ復元済みです。');
@@ -366,7 +366,7 @@ export default function BanzaiPosePage() {
     if (stage === 'occluder') {
       workingRef.current = pendingRef.current; pendingRef.current = null; moveToArms();
     } else {
-      workingRef.current = restoreOccluder(pendingRef.current, originalRef.current, occluderRef.current);
+      workingRef.current = restoreOccluder(pendingRef.current, originalRef.current, occluderRef.current, armsRef.current);
       pendingRef.current = null; setPreview(false); setStage('done');
       setMessage('前面の遮蔽物を元座標に復元しました。仕上がりを確認して保存してください。');
       setVersion((v) => v + 1);

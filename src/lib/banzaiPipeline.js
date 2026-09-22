@@ -79,9 +79,26 @@ export function selectedChangeRatio(before, after, selection) {
   return selected ? changed / selected : 0;
 }
 
-export function restoreOccluder(edited, original, occluderMask) {
-  // Pixel-for-pixel restoration of the front layer in its original coordinates.
-  return composeSelected(edited, original, occluderMask);
+// The occluder polygon is deliberately expanded to fully cover the foreground
+// subject (including where their hands grip the original arm), so it commonly
+// overlaps the arms mask near the shoulder. Restoring the occluder from the
+// original image inside that overlap would paste back the pre-edit arm pixels
+// and visibly undo the just-finished arm edit, so the overlap is carved out
+// of the occluder mask before restoring.
+export function subtractMask(base, subtract) {
+  const result = copyCanvas(base);
+  const ctx = result.getContext('2d');
+  ctx.globalCompositeOperation = 'destination-out';
+  ctx.drawImage(subtract, 0, 0);
+  return result;
+}
+
+export function restoreOccluder(edited, original, occluderMask, protectedMask) {
+  // Pixel-for-pixel restoration of the front layer in its original coordinates,
+  // except wherever protectedMask (typically the finalized arms mask) overlaps
+  // it: that area must keep the edited result, not the pre-edit original.
+  const mask = protectedMask ? subtractMask(occluderMask, protectedMask) : occluderMask;
+  return composeSelected(edited, original, mask);
 }
 
 export function estimateBanzaiTargets({ head, leftShoulder, rightShoulder, torso }) {
