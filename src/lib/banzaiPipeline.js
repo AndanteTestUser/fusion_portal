@@ -36,6 +36,24 @@ export function toOpenAIMask(selection) {
   return result;
 }
 
+// Gemini receives raw image bytes rather than a dedicated alpha-mask API, so
+// the selection (which is a translucent red overlay on a transparent
+// background) must be turned into an unambiguous opaque black/white mask
+// before it is described to the model as "white pixels mark the edit area".
+export function toBlackWhiteMask(selection) {
+  const result = makeCanvas(selection.width, selection.height);
+  const ctx = result.getContext('2d');
+  const pixels = ctx.createImageData(result.width, result.height);
+  const selected = selection.getContext('2d').getImageData(0, 0, result.width, result.height).data;
+  for (let i = 0; i < pixels.data.length; i += 4) {
+    const value = selected[i + 3];
+    pixels.data[i] = pixels.data[i + 1] = pixels.data[i + 2] = value;
+    pixels.data[i + 3] = 255;
+  }
+  ctx.putImageData(pixels, 0, 0);
+  return result;
+}
+
 export function composeSelected(base, generated, selection) {
   const output = copyCanvas(base);
   const generatedCanvas = makeCanvas(base.width, base.height);
@@ -272,11 +290,18 @@ export function createAutomaticPlan(image, analysis) {
   const arms = makeCanvas(image.width, image.height);
   const armCtx = arms.getContext('2d');
   armCtx.strokeStyle = 'rgba(255,60,80,1)'; armCtx.fillStyle = 'rgba(255,60,80,1)';
-  armCtx.lineWidth = Math.max(image.width / 35, shoulderWidth * 0.58);
+  const armWidth = Math.max(image.width / 35, shoulderWidth * 0.58);
+  armCtx.lineWidth = armWidth;
   armCtx.lineCap = 'round'; armCtx.lineJoin = 'round';
+  // Hands are wider than the forearm line and AI wrist estimates can be
+  // slightly off; a generous circle at the original wrist ensures stray
+  // fingers are not left outside the mask as residual ghost fragments.
+  const handRadius = armWidth * 1.1;
   for (const side of ['left', 'right']) {
     const shoulder = landmarks[`${side}Shoulder`];
-    armCtx.beginPath(); armCtx.moveTo(shoulder.x, shoulder.y); armCtx.lineTo(joints[`${side}Elbow`].x, joints[`${side}Elbow`].y); armCtx.lineTo(joints[`${side}Wrist`].x, joints[`${side}Wrist`].y); armCtx.stroke();
+    const wrist = joints[`${side}Wrist`];
+    armCtx.beginPath(); armCtx.moveTo(shoulder.x, shoulder.y); armCtx.lineTo(joints[`${side}Elbow`].x, joints[`${side}Elbow`].y); armCtx.lineTo(wrist.x, wrist.y); armCtx.stroke();
+    armCtx.beginPath(); armCtx.arc(wrist.x, wrist.y, handRadius, 0, Math.PI * 2); armCtx.fill();
     armCtx.beginPath(); armCtx.moveTo(shoulder.x, shoulder.y); armCtx.lineTo(targets[`${side}Hand`].x, targets[`${side}Hand`].y); armCtx.stroke();
   }
   const occluder = makeCanvas(image.width, image.height);
@@ -294,7 +319,7 @@ export function createAutomaticPlan(image, analysis) {
     // hair, clothing edges and shadows are not left behind as fragments.
     occCtx.closePath(); occCtx.fill(); occCtx.stroke();
   }
-  return { landmarks, targets, arms, occluder, confidence: analysis.confidence, summary: analysis.summary };
+  return { landmarks, targets, joints, arms, occluder, confidence: analysis.confidence, summary: analysis.summary };
 }
 
 async function responseError(response) {
@@ -336,9 +361,9 @@ export async function editWithProvider({ provider, key, image, selection, guide,
   }
 
   const source = image.toDataURL('image/png').split(',')[1];
-  const mask = selection.toDataURL('image/png').split(',')[1];
+  const mask = toBlackWhiteMask(selection).toDataURL('image/png').split(',')[1];
   const parts = [
-    { text: `${prompt}\nThe second image is a selection mask: white pixels identify the only area to change. Keep everything else identical.${guide ? ' The third image is a pose guide; its green lines show the intended arm paths and hand endpoints, and must not appear in the output.' : ''}` },
+    { text: `${prompt}\nThe second image is an opaque black-and-white selection mask, same dimensions as the first: white pixels identify the only area to change, black pixels must stay pixel-for-pixel identical.${guide ? ' The third image is a pose guide; its green lines show the intended arm paths and hand endpoints, and must not appear in the output.' : ''}` },
     { inlineData: { mimeType: 'image/png', data: source } },
     { inlineData: { mimeType: 'image/png', data: mask } },
   ];
