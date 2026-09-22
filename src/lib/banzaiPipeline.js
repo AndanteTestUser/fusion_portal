@@ -272,11 +272,18 @@ export function createAutomaticPlan(image, analysis) {
   const arms = makeCanvas(image.width, image.height);
   const armCtx = arms.getContext('2d');
   armCtx.strokeStyle = 'rgba(255,60,80,1)'; armCtx.fillStyle = 'rgba(255,60,80,1)';
-  armCtx.lineWidth = Math.max(image.width / 35, shoulderWidth * 0.58);
+  const armWidth = Math.max(image.width / 35, shoulderWidth * 0.58);
+  armCtx.lineWidth = armWidth;
   armCtx.lineCap = 'round'; armCtx.lineJoin = 'round';
+  // Hands are wider than the forearm line and AI wrist estimates can be
+  // slightly off; a generous circle at the original wrist ensures stray
+  // fingers are not left outside the mask as residual ghost fragments.
+  const handRadius = armWidth * 1.1;
   for (const side of ['left', 'right']) {
     const shoulder = landmarks[`${side}Shoulder`];
-    armCtx.beginPath(); armCtx.moveTo(shoulder.x, shoulder.y); armCtx.lineTo(joints[`${side}Elbow`].x, joints[`${side}Elbow`].y); armCtx.lineTo(joints[`${side}Wrist`].x, joints[`${side}Wrist`].y); armCtx.stroke();
+    const wrist = joints[`${side}Wrist`];
+    armCtx.beginPath(); armCtx.moveTo(shoulder.x, shoulder.y); armCtx.lineTo(joints[`${side}Elbow`].x, joints[`${side}Elbow`].y); armCtx.lineTo(wrist.x, wrist.y); armCtx.stroke();
+    armCtx.beginPath(); armCtx.arc(wrist.x, wrist.y, handRadius, 0, Math.PI * 2); armCtx.fill();
     armCtx.beginPath(); armCtx.moveTo(shoulder.x, shoulder.y); armCtx.lineTo(targets[`${side}Hand`].x, targets[`${side}Hand`].y); armCtx.stroke();
   }
   const occluder = makeCanvas(image.width, image.height);
@@ -294,7 +301,7 @@ export function createAutomaticPlan(image, analysis) {
     // hair, clothing edges and shadows are not left behind as fragments.
     occCtx.closePath(); occCtx.fill(); occCtx.stroke();
   }
-  return { landmarks, targets, arms, occluder, confidence: analysis.confidence, summary: analysis.summary };
+  return { landmarks, targets, joints, arms, occluder, confidence: analysis.confidence, summary: analysis.summary };
 }
 
 async function responseError(response) {

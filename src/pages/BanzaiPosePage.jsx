@@ -177,7 +177,7 @@ export default function BanzaiPosePage() {
       const guide = makePoseGuide(base, plan.landmarks, plan.targets);
       const generated = await editWithProvider({
         provider, key, image: base, selection: plan.arms, guide, signal: controller.signal,
-        prompt: `Edit only the main lying subject's two arms into a fully extended, anatomically natural overhead banzai pose toward their head. The second input is a green pose guide from each shoulder to its target hand; follow it but never render the guide. Keep both elbows straight, reconstruct correct shoulder and underarm anatomy, remove every trace of the old arm pose inside the mask, and preserve face, torso, clothes, other people, camera, composition, aspect ratio and all unmasked pixels.`,
+        prompt: `Edit only the main lying subject's two arms into a fully extended, anatomically natural overhead banzai pose toward their head. The second input is a green pose guide from each shoulder to its target hand; follow it but never render the guide. Keep both elbows straight, reconstruct correct shoulder and underarm anatomy, remove every trace of the old arm pose inside the mask including any disconnected hand or finger fragments, and preserve face, torso, clothes, other people, camera, composition, aspect ratio and all unmasked pixels. The subject is lying down, so gravity rests the extended forearms and hands against the surface beneath them: keep them resting flat on that surface along their full length with a matching contact shadow and perspective, not floating above it.`,
       });
       let result = composeSelected(base, generated, plan.arms);
       if (selectedChangeRatio(base, result, plan.arms) < 0.005) throw new Error('両腕の変化を確認できませんでした');
@@ -275,12 +275,25 @@ export default function BanzaiPosePage() {
     if (!targets) return setMessage('頭・胴体・両肩の4点を指定してください。');
     const mask = armsRef.current;
     const ctx = mask.getContext('2d');
+    const shoulderWidth = Math.hypot(landmarks.leftShoulder.x - landmarks.rightShoulder.x, landmarks.leftShoulder.y - landmarks.rightShoulder.y);
+    const width = Math.max(18, shoulderWidth * 0.38);
     ctx.save();
     ctx.strokeStyle = 'rgba(255, 60, 80, 1)';
-    ctx.lineWidth = Math.max(18, Math.hypot(landmarks.leftShoulder.x - landmarks.rightShoulder.x, landmarks.leftShoulder.y - landmarks.rightShoulder.y) * 0.38);
-    ctx.lineCap = 'round';
+    ctx.fillStyle = 'rgba(255, 60, 80, 1)';
+    ctx.lineWidth = width;
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    const joints = autoPlanRef.current?.joints;
     for (const [side, hand] of [['left', targets.leftHand], ['right', targets.rightHand]]) {
       const shoulder = landmarks[`${side}Shoulder`];
+      // Also cover the original elbow/wrist path (and a buffer around the
+      // original hand) so the automatic update doesn't leave the previous
+      // arm's pixels outside the mask as residual ghost fragments.
+      const elbow = joints?.[`${side}Elbow`];
+      const wrist = joints?.[`${side}Wrist`];
+      if (elbow && wrist) {
+        ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(elbow.x, elbow.y); ctx.lineTo(wrist.x, wrist.y); ctx.stroke();
+        ctx.beginPath(); ctx.arc(wrist.x, wrist.y, width * 1.1, 0, Math.PI * 2); ctx.fill();
+      }
       ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(hand.x, hand.y); ctx.stroke();
     }
     ctx.restore();
@@ -329,7 +342,7 @@ export default function BanzaiPosePage() {
     try {
       const prompt = stage === 'occluder'
         ? 'Remove only the foreground occluding person or object inside the transparent mask. Complete the hidden surface and the background in the same camera angle, style and lighting. This is a temporary edit base; preserve the lying subject, their pose, all unmasked pixels, furniture and canvas framing.'
-        : `Edit only the lying subject's two arms into a fully extended, anatomically natural overhead banzai pose in the direction of their head. The second input image is a pose guide with green lines from each shoulder toward a virtual target. Use those lines for the arm paths, but do not render the green lines. A target may be outside the crop: in that case, continue the arm naturally through the image edge and keep the hand out of frame instead of bending or shortening the arm. The head is at (${Math.round(landmarks.head.x)},${Math.round(landmarks.head.y)}), torso at (${Math.round(landmarks.torso.x)},${Math.round(landmarks.torso.y)}). Match shoulder joints and perspective, not equal lengths in image pixels. Remove traces of the old arm pose inside the mask. Preserve the subject's face, torso, clothing, other people, scene, camera, framing and proportions.`;
+        : `Edit only the lying subject's two arms into a fully extended, anatomically natural overhead banzai pose in the direction of their head. The second input image is a pose guide with green lines from each shoulder toward a virtual target. Use those lines for the arm paths, but do not render the green lines. A target may be outside the crop: in that case, continue the arm naturally through the image edge and keep the hand out of frame instead of bending or shortening the arm. The head is at (${Math.round(landmarks.head.x)},${Math.round(landmarks.head.y)}), torso at (${Math.round(landmarks.torso.x)},${Math.round(landmarks.torso.y)}). Match shoulder joints and perspective, not equal lengths in image pixels. Remove traces of the old arm pose inside the mask, including any disconnected hand or finger fragments left outside the new pose. The subject is lying down, so gravity rests the extended forearms and hands against the surface beneath them: keep them resting flat on that surface along their full length with a matching contact shadow and perspective, not floating above it. Preserve the subject's face, torso, clothing, other people, scene, camera, framing and proportions.`;
       const guide = stage === 'arms' ? makePoseGuide(workingRef.current, landmarks, targets) : null;
       const generated = await editWithProvider({ provider, key, image: workingRef.current, selection: selected, guide, prompt, signal: controller.signal });
       pendingRef.current = composeSelected(workingRef.current, generated, selected);
