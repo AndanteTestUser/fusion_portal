@@ -85,6 +85,7 @@ export default function ProportionRepairPage() {
   const fileRef = useRef(null);
   const manualFileRef = useRef(null);
   const canvasRef = useRef(null);
+  const editorViewportRef = useRef(null);
   const pointerRef = useRef(null);
   const abortRef = useRef(null);
   const originalRef = useRef(null);
@@ -98,6 +99,8 @@ export default function ProportionRepairPage() {
   const [stretchFactor, setStretchFactor] = useState(DEFAULT_STRETCH_FACTOR);
   const [selection, setSelection] = useState(null);
   const [transform, setTransform] = useState({ scale: 0.78, rotation: 0, offsetX: 0, offsetY: 0 });
+  const [editorMode, setEditorMode] = useState('pan');
+  const [editorZoom, setEditorZoom] = useState(1);
   const [provider, setProvider] = useState('openai');
   const [fallback, setFallback] = useState(true);
   const [repairNotes, setRepairNotes] = useState('灰色の塗り跡、黒い継ぎ目、切り抜き境界、途切れた背景と髪を自然につなぐ');
@@ -126,7 +129,7 @@ export default function ProportionRepairPage() {
     undoRef.current = [];
     setOriginalMeta({ width: original.width, height: original.height, ratio: original.width / original.height, filename });
     setUrls({ original: canvasToDataUrl(original), stretched: canvasToDataUrl(stretched), manual: canvasToDataUrl(stretched), normalized: '', repaired: '' });
-    setSelection(null); setStep(1); setRequestCount(0); setSlider(50);
+    setSelection(null); setEditorMode('pan'); setEditorZoom(1); setStep(1); setRequestCount(0); setSlider(50);
     setMessage('元画像の解像度と縦横比を記録しました。工程2へ進めます。');
     setVersion((value) => value + 1);
   }, [stretchFactor]);
@@ -194,7 +197,7 @@ export default function ProportionRepairPage() {
     return { x: (event.clientX - rect.left) * canvasRef.current.width / rect.width, y: (event.clientY - rect.top) * canvasRef.current.height / rect.height };
   };
   const pointerDown = (event) => {
-    if (step !== 3 || busy || !manualRef.current) return;
+    if (step !== 3 || editorMode !== 'select' || busy || !manualRef.current) return;
     event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId);
     pointerRef.current = canvasPosition(event); setSelection(null);
   };
@@ -203,7 +206,23 @@ export default function ProportionRepairPage() {
     event.preventDefault();
     setSelection(normalizeSelectionRect(pointerRef.current, canvasPosition(event), manualRef.current.width, manualRef.current.height));
   };
-  const pointerUp = () => { pointerRef.current = null; };
+  const pointerUp = (event) => {
+    if (!pointerRef.current || !manualRef.current) return;
+    const next = normalizeSelectionRect(pointerRef.current, canvasPosition(event), manualRef.current.width, manualRef.current.height);
+    pointerRef.current = null;
+    if (!next) return;
+    setSelection(next);
+    setEditorMode('pan');
+    setMessage('範囲を選択しました。表示移動モードに戻しました。下のボタンで大きさと位置を調整してください。');
+  };
+  const pointerCancel = () => { pointerRef.current = null; };
+
+  const changeTransform = (patch) => setTransform((current) => ({ ...current, ...patch }));
+  const nudgeTransform = (key, amount) => setTransform((current) => {
+    const limits = key === 'scale' ? [0.45, 1.4] : key === 'rotation' ? [-30, 30] : [-400, 400];
+    const next = Math.max(limits[0], Math.min(limits[1], Number((current[key] + amount).toFixed(2))));
+    return { ...current, [key]: next };
+  });
 
   const rebuildStretch = () => {
     if (!originalRef.current) return;
@@ -212,7 +231,7 @@ export default function ProportionRepairPage() {
     manualRef.current = copyCanvas(stretchedRef.current);
     normalizedRef.current = null; repairedRef.current = null; undoRef.current = [];
     setUrls((current) => ({ ...current, stretched: canvasToDataUrl(stretchedRef.current), manual: canvasToDataUrl(manualRef.current), normalized: '', repaired: '' }));
-    setSelection(null); setStep(2); setMessage(`横幅${size.width}pxを維持し、高さだけ${size.height}pxへ伸長しました。`); setVersion((value) => value + 1);
+    setSelection(null); setEditorMode('pan'); setEditorZoom(1); setStep(2); setMessage(`横幅${size.width}pxを維持し、高さだけ${size.height}pxへ伸長しました。`); setVersion((value) => value + 1);
   };
 
   const applyTransform = () => {
@@ -233,7 +252,7 @@ export default function ProportionRepairPage() {
     try {
       const canvas = await dataUrlToCanvas(await readFileAsDataUrl(file));
       undoRef.current = manualRef.current ? [...undoRef.current.slice(-9), copyCanvas(manualRef.current)] : [];
-      manualRef.current = canvas; updateUrl('manual', canvas); setSelection(null); setStep(3);
+      manualRef.current = canvas; updateUrl('manual', canvas); setSelection(null); setEditorMode('pan'); setEditorZoom(1); setStep(3);
       setMessage('外部で手修正した画像を読み込みました。元比率へ復元できます。'); setVersion((value) => value + 1);
     } catch (error) { setMessage(error.message); }
   };
@@ -282,7 +301,7 @@ export default function ProportionRepairPage() {
 
   const reset = () => {
     abortRef.current?.abort(); originalRef.current = stretchedRef.current = manualRef.current = normalizedRef.current = repairedRef.current = null;
-    undoRef.current = []; setUrls({ original: '', stretched: '', manual: '', normalized: '', repaired: '' }); setOriginalMeta(null); setSelection(null); setStep(1); setRequestCount(0); setMessage('元画像を選択してください。'); setVersion((value) => value + 1);
+    undoRef.current = []; setUrls({ original: '', stretched: '', manual: '', normalized: '', repaired: '' }); setOriginalMeta(null); setSelection(null); setEditorMode('pan'); setEditorZoom(1); setStep(1); setRequestCount(0); setMessage('元画像を選択してください。'); setVersion((value) => value + 1);
   };
 
   const canVisit = (number) => number === 1 ? Boolean(urls.original) : number === 2 ? Boolean(urls.stretched) : number === 3 ? Boolean(urls.manual) : Boolean(urls.normalized);
@@ -305,13 +324,32 @@ export default function ProportionRepairPage() {
               <span>{message}</span>
               {originalMeta && <span className="shrink-0 font-mono">元 {originalMeta.width}×{originalMeta.height}</span>}
             </div>
-            <div className="relative flex min-h-[24rem] flex-1 items-center justify-center overflow-hidden bg-black">
+            <div ref={editorViewportRef} className={`relative flex-1 bg-black ${step === 3 ? 'block h-[62svh] min-h-[28rem] overflow-auto overscroll-contain' : 'flex min-h-[24rem] items-center justify-center overflow-hidden'}`}>
+              {step === 3 && urls.manual && (
+                <div className="sticky left-0 top-0 z-30 flex w-full flex-wrap justify-center gap-1 border-b border-slate-600 bg-slate-950/95 p-1.5 shadow-xl backdrop-blur">
+                  <button type="button" className={`min-h-11 rounded-lg px-3 text-xs font-bold ${editorMode === 'pan' ? 'bg-cyan-600 text-white' : 'bg-slate-800 text-slate-200'}`} onClick={() => setEditorMode('pan')}>✋ 表示を移動</button>
+                  <button type="button" className={`min-h-11 rounded-lg px-3 text-xs font-bold ${editorMode === 'select' ? 'bg-cyan-600 text-white' : 'bg-slate-800 text-slate-200'}`} onClick={() => { setEditorMode('select'); setSelection(null); setMessage('選択モードです。修正したい範囲を指で囲んでください。選択後は自動で表示移動モードへ戻ります。'); }}>＋ 範囲を選択</button>
+                  <button type="button" aria-label="縮小表示" className="min-h-11 min-w-11 rounded-lg bg-slate-800 text-lg" onClick={() => setEditorZoom((value) => Math.max(0.75, Number((value - 0.25).toFixed(2))))}>−</button>
+                  <span className="flex min-h-11 min-w-14 items-center justify-center rounded-lg bg-black/50 px-2 font-mono text-xs">{Math.round(editorZoom * 100)}%</span>
+                  <button type="button" aria-label="拡大表示" className="min-h-11 min-w-11 rounded-lg bg-slate-800 text-lg" onClick={() => setEditorZoom((value) => Math.min(3, Number((value + 0.25).toFixed(2))))}>＋</button>
+                </div>
+              )}
               {!urls.original ? (
                 <button type="button" className="flex h-full w-full flex-col items-center justify-center gap-2 p-8 text-slate-400 hover:bg-slate-900" onClick={() => fileRef.current?.click()}><span className="text-4xl">↥</span><span className="font-semibold">元画像を選択</span><span className="text-xs">選択時点ではAPI通信しません</span></button>
               ) : step === 4 && urls.repaired ? (
                 <Comparison before={urls.normalized} after={urls.repaired} slider={slider} setSlider={setSlider} />
               ) : (
-                <canvas ref={canvasRef} onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={pointerUp} className={`max-h-full max-w-full object-contain ${step === 3 ? 'cursor-crosshair touch-none' : ''}`} />
+                <canvas
+                  ref={canvasRef}
+                  onPointerDown={pointerDown}
+                  onPointerMove={pointerMove}
+                  onPointerUp={pointerUp}
+                  onPointerCancel={pointerCancel}
+                  className={step === 3
+                    ? `shrink-0 select-none ${editorMode === 'select' ? 'cursor-crosshair touch-none' : 'cursor-grab touch-pan-x touch-pan-y'}`
+                    : 'max-h-full max-w-full object-contain'}
+                  style={step === 3 ? { width: `${editorZoom * 100}%`, height: 'auto', maxWidth: 'none' } : undefined}
+                />
               )}
               {urls.original && <button type="button" className="absolute bottom-3 right-3 z-30 rounded-lg bg-black/75 px-3 py-2 text-xs font-semibold" onClick={() => fileRef.current?.click()}>画像変更</button>}
               <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={(event) => { loadFile(event.target.files?.[0]); event.target.value = ''; }} />
@@ -333,16 +371,40 @@ export default function ProportionRepairPage() {
                 <Range label="縦伸長率" value={Number(stretchFactor.toFixed(3))} min={1.05} max={1.6} step={0.01} onChange={setStretchFactor} />
                 <div className="grid grid-cols-4 gap-1">{[1.2, 1.25, 4 / 3, 1.4].map((value) => <button key={value} type="button" className="btn px-1 text-xs" onClick={() => setStretchFactor(value)}>{value === 4 / 3 ? '4/3' : value}</button>)}</div>
                 <button type="button" className="btn w-full" onClick={rebuildStretch}>この倍率で再作成</button>
-                <button type="button" className="btn w-full border-cyan-700 bg-cyan-700" onClick={() => { setStep(3); setMessage('画像上で頭部などの修正範囲をドラッグして囲んでください。'); }}>工程3へ</button>
+                <button type="button" className="btn w-full border-cyan-700 bg-cyan-700" onClick={() => { setStep(3); setEditorMode('pan'); setEditorZoom(1); setMessage('まず表示をスクロールして対象を画面内に置き、「範囲を選択」を押してください。'); }}>工程3へ</button>
               </>}
 
               {step === 3 && <>
                 <h2 className="font-bold">工程3：頭身調整</h2>
-                <p className="text-sm text-slate-400">画像上で修正範囲をドラッグして囲み、縮小・移動・回転します。背景の仮補填は工程4で修復します。</p>
+                <div className="rounded-lg border border-cyan-800 bg-cyan-950/40 p-3 text-sm text-cyan-100">
+                  <b>{selection ? '範囲を選択済み' : editorMode === 'select' ? '選択モード' : '表示移動モード'}</b>
+                  <p className="mt-1 text-xs text-cyan-200/80">表示移動中は画像を上下左右へスクロールできます。「範囲を選択」を押した時だけ、指のドラッグが選択操作になります。</p>
+                </div>
                 <Range label="選択範囲の倍率" value={transform.scale} min={0.45} max={1.4} step={0.01} unit="×" onChange={(value) => setTransform((current) => ({ ...current, scale: value }))} />
+                <div className="grid grid-cols-3 gap-2">
+                  <button type="button" className="btn min-h-11" disabled={!selection} onClick={() => nudgeTransform('scale', -0.05)}>− 小さく</button>
+                  <button type="button" className="btn min-h-11" disabled={!selection} onClick={() => changeTransform({ scale: 1 })}>等倍</button>
+                  <button type="button" className="btn min-h-11" disabled={!selection} onClick={() => nudgeTransform('scale', 0.05)}>＋ 大きく</button>
+                </div>
                 <Range label="左右移動" value={transform.offsetX} min={-400} max={400} unit="px" onChange={(value) => setTransform((current) => ({ ...current, offsetX: value }))} />
                 <Range label="上下移動" value={transform.offsetY} min={-400} max={400} unit="px" onChange={(value) => setTransform((current) => ({ ...current, offsetY: value }))} />
+                <div className="mx-auto grid w-44 grid-cols-3 gap-2">
+                  <span />
+                  <button type="button" aria-label="上へ移動" className="btn min-h-11 text-lg" disabled={!selection} onClick={() => nudgeTransform('offsetY', -12)}>↑</button>
+                  <span />
+                  <button type="button" aria-label="左へ移動" className="btn min-h-11 text-lg" disabled={!selection} onClick={() => nudgeTransform('offsetX', -12)}>←</button>
+                  <button type="button" className="btn min-h-11 text-xs" disabled={!selection} onClick={() => changeTransform({ offsetX: 0, offsetY: 0 })}>中央</button>
+                  <button type="button" aria-label="右へ移動" className="btn min-h-11 text-lg" disabled={!selection} onClick={() => nudgeTransform('offsetX', 12)}>→</button>
+                  <span />
+                  <button type="button" aria-label="下へ移動" className="btn min-h-11 text-lg" disabled={!selection} onClick={() => nudgeTransform('offsetY', 12)}>↓</button>
+                  <span />
+                </div>
                 <Range label="回転" value={transform.rotation} min={-30} max={30} unit="°" onChange={(value) => setTransform((current) => ({ ...current, rotation: value }))} />
+                <div className="grid grid-cols-3 gap-2">
+                  <button type="button" className="btn min-h-11" disabled={!selection} onClick={() => nudgeTransform('rotation', -1)}>↶ −1°</button>
+                  <button type="button" className="btn min-h-11" disabled={!selection} onClick={() => changeTransform({ rotation: 0 })}>0°</button>
+                  <button type="button" className="btn min-h-11" disabled={!selection} onClick={() => nudgeTransform('rotation', 1)}>＋1° ↷</button>
+                </div>
                 <div className="grid grid-cols-2 gap-2"><button type="button" className="btn" onClick={undo} disabled={!undoRef.current.length}>↶ 戻す</button><button type="button" className="btn border-cyan-700 bg-cyan-700" onClick={applyTransform} disabled={!selection}>調整を適用</button></div>
                 <button type="button" className="btn w-full" onClick={() => manualFileRef.current?.click()}>外部で手修正した画像を読込</button>
                 <button type="button" className="btn w-full border-cyan-700 bg-cyan-700" onClick={normalize}>元比率へ戻して工程4へ</button>
