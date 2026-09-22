@@ -285,13 +285,14 @@ export default function BanzaiPosePage() {
     const oldCtx = armsOldRegionRef.current.getContext('2d');
     const shoulderWidth = Math.hypot(landmarks.leftShoulder.x - landmarks.rightShoulder.x, landmarks.leftShoulder.y - landmarks.rightShoulder.y);
     const width = Math.max(18, shoulderWidth * 0.38);
-    for (const c of [ctx, oldCtx]) {
-      c.save();
-      c.strokeStyle = 'rgba(255, 60, 80, 1)';
-      c.fillStyle = 'rgba(255, 60, 80, 1)';
-      c.lineWidth = width;
-      c.lineCap = 'round'; c.lineJoin = 'round';
-    }
+    // Narrower than the edit mask's width on purpose: see banzaiPipeline.js's
+    // armsOldRegion comment. This only needs to suppress the old arm's own
+    // pixels leaking back through restoreOccluder, not fully cover the arm
+    // for editing, and covers the full shoulder-to-wrist length (unlike the
+    // edit mask) so no gap reopens near the joint.
+    const oldRegionWidth = width * 0.4;
+    ctx.save(); ctx.strokeStyle = 'rgba(255, 60, 80, 1)'; ctx.fillStyle = 'rgba(255, 60, 80, 1)'; ctx.lineWidth = width; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    oldCtx.save(); oldCtx.strokeStyle = 'rgba(255, 60, 80, 1)'; oldCtx.fillStyle = 'rgba(255, 60, 80, 1)'; oldCtx.lineWidth = oldRegionWidth; oldCtx.lineCap = 'round'; oldCtx.lineJoin = 'round';
     const joints = autoPlanRef.current?.joints;
     for (const [side, hand] of [['left', targets.leftHand], ['right', targets.rightHand]]) {
       const shoulder = landmarks[`${side}Shoulder`];
@@ -305,10 +306,10 @@ export default function BanzaiPosePage() {
       const elbow = joints?.[`${side}Elbow`];
       const wrist = joints?.[`${side}Wrist`];
       if (elbow && wrist) {
-        for (const c of [ctx, oldCtx]) {
-          c.beginPath(); c.moveTo(shoulder.x, shoulder.y); c.lineTo(elbow.x, elbow.y); c.lineTo(wrist.x, wrist.y); c.stroke();
-          c.beginPath(); c.arc(wrist.x, wrist.y, width * 1.1, 0, Math.PI * 2); c.fill();
-        }
+        ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(elbow.x, elbow.y); ctx.lineTo(wrist.x, wrist.y); ctx.stroke();
+        ctx.beginPath(); ctx.arc(wrist.x, wrist.y, width * 1.1, 0, Math.PI * 2); ctx.fill();
+        oldCtx.beginPath(); oldCtx.moveTo(shoulder.x, shoulder.y); oldCtx.lineTo(elbow.x, elbow.y); oldCtx.lineTo(wrist.x, wrist.y); oldCtx.stroke();
+        oldCtx.beginPath(); oldCtx.arc(wrist.x, wrist.y, oldRegionWidth * 1.1, 0, Math.PI * 2); oldCtx.fill();
       }
       ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(hand.x, hand.y); ctx.stroke();
       // The corridor's round cap at the target is only as wide as the

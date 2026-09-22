@@ -332,15 +332,27 @@ export function createAutomaticPlan(image, analysis) {
   const armsOldRegion = makeCanvas(image.width, image.height);
   const oldCtx = armsOldRegion.getContext('2d');
   oldCtx.strokeStyle = 'rgba(255,60,80,1)'; oldCtx.fillStyle = 'rgba(255,60,80,1)';
-  oldCtx.lineWidth = armWidth;
+  // Narrower than the edit mask's armWidth on purpose: this only needs to
+  // suppress the old arm's own pixels leaking back through restoreOccluder
+  // wherever the occluder polygon happens to graze them, not fully cover the
+  // arm for editing. Earlier this session, insetting this stroke's start
+  // away from the shoulder (to stop swallowing another subject's whole hand
+  // resting there) instead let a real, visible chunk of the pre-edit arm
+  // leak back in near the shoulder, since that area was no longer excluded
+  // at all. Keep the full shoulder-to-wrist length covered so no gap reopens
+  // near the joint, but shrink the width so it stays a thin buffer rather
+  // than a shape wide enough to swallow an unrelated adjacent hand.
+  const oldRegionWidth = armWidth * 0.4;
+  oldCtx.lineWidth = oldRegionWidth;
   oldCtx.lineCap = 'round'; oldCtx.lineJoin = 'round';
   for (const side of ['left', 'right']) {
     const shoulder = landmarks[`${side}Shoulder`];
+    const elbow = joints[`${side}Elbow`];
     const wrist = joints[`${side}Wrist`];
-    armCtx.beginPath(); armCtx.moveTo(shoulder.x, shoulder.y); armCtx.lineTo(joints[`${side}Elbow`].x, joints[`${side}Elbow`].y); armCtx.lineTo(wrist.x, wrist.y); armCtx.stroke();
+    armCtx.beginPath(); armCtx.moveTo(shoulder.x, shoulder.y); armCtx.lineTo(elbow.x, elbow.y); armCtx.lineTo(wrist.x, wrist.y); armCtx.stroke();
     armCtx.beginPath(); armCtx.arc(wrist.x, wrist.y, handRadius, 0, Math.PI * 2); armCtx.fill();
-    oldCtx.beginPath(); oldCtx.moveTo(shoulder.x, shoulder.y); oldCtx.lineTo(joints[`${side}Elbow`].x, joints[`${side}Elbow`].y); oldCtx.lineTo(wrist.x, wrist.y); oldCtx.stroke();
-    oldCtx.beginPath(); oldCtx.arc(wrist.x, wrist.y, handRadius, 0, Math.PI * 2); oldCtx.fill();
+    oldCtx.beginPath(); oldCtx.moveTo(shoulder.x, shoulder.y); oldCtx.lineTo(elbow.x, elbow.y); oldCtx.lineTo(wrist.x, wrist.y); oldCtx.stroke();
+    oldCtx.beginPath(); oldCtx.arc(wrist.x, wrist.y, oldRegionWidth * 1.1, 0, Math.PI * 2); oldCtx.fill();
     armCtx.beginPath(); armCtx.moveTo(shoulder.x, shoulder.y); armCtx.lineTo(targets[`${side}Hand`].x, targets[`${side}Hand`].y); armCtx.stroke();
     // The reach corridor's stroke only gives the target endpoint a round cap
     // as wide as the forearm; a hand needs more room than that, exactly like
