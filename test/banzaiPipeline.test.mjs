@@ -1,6 +1,30 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { estimateBanzaiTargets, openAIOutputSize, parseStructuredJson } from '../src/lib/banzaiPipeline.js';
+import { estimateBanzaiTargets, excludeConnectedOverlap, openAIOutputSize, parseStructuredJson } from '../src/lib/banzaiPipeline.js';
+
+// 5x1 strip: an occluder blob at x=0..2 whose rightmost pixel (x=2) touches
+// an arm-mask pixel at x=2..4. The two blobs are unconnected to each other
+// within maskData itself; excludeConnectedOverlap should drop the whole
+// left-hand blob (x=0,1,2), not just x=2 where the overlap is.
+function makeRgba(alphas) {
+  const data = new Uint8ClampedArray(alphas.length * 4);
+  alphas.forEach((a, i) => { data[i * 4 + 3] = a; });
+  return data;
+}
+
+test('excludeConnectedOverlap drops an entire component touching the reference, not just the shared pixel', () => {
+  const mask = makeRgba([255, 255, 255, 0, 0]);
+  const ref = makeRgba([0, 0, 255, 255, 0]);
+  const result = excludeConnectedOverlap(5, 1, mask, ref);
+  assert.deepEqual(Array.from(result.filter((_, i) => i % 4 === 3)), [0, 0, 0, 0, 0]);
+});
+
+test('excludeConnectedOverlap keeps a component that never touches the reference', () => {
+  const mask = makeRgba([255, 255, 0, 0, 0]);
+  const ref = makeRgba([0, 0, 0, 255, 255]);
+  const result = excludeConnectedOverlap(5, 1, mask, ref);
+  assert.deepEqual(Array.from(result.filter((_, i) => i % 4 === 3)), [255, 255, 0, 0, 0]);
+});
 
 test('targets follow the subject head direction rather than the top of the image', () => {
   const points = {
