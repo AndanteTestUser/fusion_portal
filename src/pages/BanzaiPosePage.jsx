@@ -147,8 +147,10 @@ export default function BanzaiPosePage() {
           result.getContext('2d').drawImage(automatic, 0, 0);
           return result;
         };
-        occluderRef.current = merge(occluderRef.current, plan.occluder);
-        armsRef.current = merge(armsRef.current, plan.arms);
+        // Don't clobber a mask the user has already started correcting by
+        // hand while the analysis was still running.
+        if (!manualTouchedRef.current.occluder) occluderRef.current = merge(occluderRef.current, plan.occluder);
+        if (!manualTouchedRef.current.arms) armsRef.current = merge(armsRef.current, plan.arms);
         if (advancedReturnRef.current?.stage === 'analyzing') {
           advancedReturnRef.current = {
             image: copyCanvas(image),
@@ -308,7 +310,8 @@ export default function BanzaiPosePage() {
     if (!shoulder || !current || !image) return;
     let dx = current.x - shoulder.x;
     let dy = current.y - shoulder.y;
-    const length = Math.hypot(dx, dy) || 1;
+    const length = Math.hypot(dx, dy);
+    if (length < 0.01) return setMessage(`${side === 'left' ? '左' : '右'}腕の伸ばす方向を判定できませんでした。目標点を肩から離してください。`);
     dx /= length; dy /= length;
     const candidates = [];
     if (dx > 0) candidates.push((image.width - shoulder.x) / dx);

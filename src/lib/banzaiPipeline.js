@@ -36,6 +36,24 @@ export function toOpenAIMask(selection) {
   return result;
 }
 
+// Gemini receives raw image bytes rather than a dedicated alpha-mask API, so
+// the selection (which is a translucent red overlay on a transparent
+// background) must be turned into an unambiguous opaque black/white mask
+// before it is described to the model as "white pixels mark the edit area".
+export function toBlackWhiteMask(selection) {
+  const result = makeCanvas(selection.width, selection.height);
+  const ctx = result.getContext('2d');
+  const pixels = ctx.createImageData(result.width, result.height);
+  const selected = selection.getContext('2d').getImageData(0, 0, result.width, result.height).data;
+  for (let i = 0; i < pixels.data.length; i += 4) {
+    const value = selected[i + 3];
+    pixels.data[i] = pixels.data[i + 1] = pixels.data[i + 2] = value;
+    pixels.data[i + 3] = 255;
+  }
+  ctx.putImageData(pixels, 0, 0);
+  return result;
+}
+
 export function composeSelected(base, generated, selection) {
   const output = copyCanvas(base);
   const generatedCanvas = makeCanvas(base.width, base.height);
@@ -343,9 +361,9 @@ export async function editWithProvider({ provider, key, image, selection, guide,
   }
 
   const source = image.toDataURL('image/png').split(',')[1];
-  const mask = selection.toDataURL('image/png').split(',')[1];
+  const mask = toBlackWhiteMask(selection).toDataURL('image/png').split(',')[1];
   const parts = [
-    { text: `${prompt}\nThe second image is a selection mask: white pixels identify the only area to change. Keep everything else identical.${guide ? ' The third image is a pose guide; its green lines show the intended arm paths and hand endpoints, and must not appear in the output.' : ''}` },
+    { text: `${prompt}\nThe second image is an opaque black-and-white selection mask, same dimensions as the first: white pixels identify the only area to change, black pixels must stay pixel-for-pixel identical.${guide ? ' The third image is a pose guide; its green lines show the intended arm paths and hand endpoints, and must not appear in the output.' : ''}` },
     { inlineData: { mimeType: 'image/png', data: source } },
     { inlineData: { mimeType: 'image/png', data: mask } },
   ];
