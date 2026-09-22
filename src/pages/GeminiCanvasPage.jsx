@@ -7,6 +7,7 @@ import {
   getGeminiErrorMessage,
   isRetryableGeminiStatus,
   parseTags,
+  sliderPositionFromClientX,
 } from '../lib/geminiCanvas.js';
 
 const PRESET_STORAGE_KEY = 'fusion_portal_gemini_canvas_presets';
@@ -138,7 +139,7 @@ async function generateImage(prompt, dataUrl, apiKey, signal) {
   return `data:${result.mimeType || 'image/png'};base64,${result.data}`;
 }
 
-function Field({ label, hint, rows, value, onChange }) {
+function Field({ label, hint, rows, value, onChange, placeholder }) {
   return (
     <label className="block">
       <span className="mb-1 flex flex-wrap items-center gap-1 text-xs font-semibold text-slate-300">
@@ -147,8 +148,9 @@ function Field({ label, hint, rows, value, onChange }) {
       <textarea
         rows={rows}
         value={value}
+        placeholder={placeholder}
         onChange={(event) => onChange(event.target.value)}
-        className="w-full resize-y rounded-lg border border-slate-700 bg-slate-800 p-2 text-sm leading-5 text-slate-100 outline-none transition-colors focus:border-violet-500"
+        className="w-full resize-y rounded-lg border border-slate-700 bg-slate-800 p-2 text-sm leading-5 text-slate-100 outline-none transition-colors placeholder:text-slate-500 focus:border-violet-500"
       />
     </label>
   );
@@ -158,6 +160,7 @@ export default function GeminiCanvasPage() {
   const { entries } = useApiKeys();
   const apiKey = entries.gemini?.apiKey || '';
   const fileInputRef = useRef(null);
+  const comparisonRef = useRef(null);
   const abortRef = useRef(null);
   const [mode, setMode] = useState('specialized');
   const [sourceUrl, setSourceUrl] = useState('');
@@ -171,10 +174,10 @@ export default function GeminiCanvasPage() {
   const [autoRetry, setAutoRetry] = useState(true);
   const [addLightEffects, setAddLightEffects] = useState(false);
   const [clarifyClothing, setClarifyClothing] = useState(false);
-  const [situation, setSituation] = useState('画像を読み込むと構図タグが自動入力されます。');
-  const [style, setStyle] = useState('(mature adult body:1.2), tall stature, slender');
-  const [face, setFace] = useState('(gentle eyes:1.1), soft facial features, playful smile, detailed shading, intricate details');
-  const [negative, setNegative] = useState('childlike proportions, chibi, deformed anatomy, poorly drawn hands, poorly drawn face, flat color');
+  const [situation, setSituation] = useState('');
+  const [style, setStyle] = useState('');
+  const [face, setFace] = useState('');
+  const [negative, setNegative] = useState('');
 
   const addLog = useCallback((message, type = 'normal') => {
     setLogs((current) => [...current.slice(-59), { at: now(), message, type }]);
@@ -182,7 +185,6 @@ export default function GeminiCanvasPage() {
 
   const analyzeLoadedImage = useCallback(async (dataUrl) => {
     if (!apiKey) {
-      setSituation('Gemini APIキーを設定すると、画像の構図タグを自動解析できます。');
       setStatus('画像を読み込みました。Gemini APIキーは未設定です。');
       addLog('画像読込完了。Gemini APIキー未設定のため解析を待機しています。', 'warn');
       return;
@@ -201,7 +203,6 @@ export default function GeminiCanvasPage() {
     } catch (error) {
       if (error.name === 'AbortError') return;
       setStatus(`解析に失敗しました: ${error.message}`);
-      setSituation('解析に失敗しました。手動で入力してください。');
       addLog(`画像解析エラー: ${error.message}`, 'error');
     } finally {
       setBusy('');
@@ -217,6 +218,7 @@ export default function GeminiCanvasPage() {
       setResultUrl('');
       setSlider(50);
       setTags([]);
+      setSituation('');
       await analyzeLoadedImage(normalized);
     } catch (error) {
       setStatus(error.message);
@@ -236,6 +238,40 @@ export default function GeminiCanvasPage() {
   const finalPrompt = useMemo(() => buildGeminiCanvasPrompt({
     mode, situation, style, face, negative, addLightEffects, clarifyClothing,
   }), [mode, situation, style, face, negative, addLightEffects, clarifyClothing]);
+
+  const updateSliderFromPointer = useCallback((clientX) => {
+    const rect = comparisonRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    setSlider(sliderPositionFromClientX(clientX, rect.left, rect.width));
+  }, []);
+
+  const handleSliderPointerDown = useCallback((event) => {
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    updateSliderFromPointer(event.clientX);
+  }, [updateSliderFromPointer]);
+
+  const handleSliderPointerMove = useCallback((event) => {
+    if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+    event.preventDefault();
+    updateSliderFromPointer(event.clientX);
+  }, [updateSliderFromPointer]);
+
+  const handleSliderKeyDown = useCallback((event) => {
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') {
+      event.preventDefault();
+      setSlider((value) => Math.max(0, value - 2));
+    } else if (event.key === 'ArrowRight' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      setSlider((value) => Math.min(100, value + 2));
+    } else if (event.key === 'Home') {
+      event.preventDefault();
+      setSlider(0);
+    } else if (event.key === 'End') {
+      event.preventDefault();
+      setSlider(100);
+    }
+  }, []);
 
   const runGeneration = async () => {
     if (!sourceUrl) return setStatus('先に元画像を選択してください。');
@@ -326,7 +362,7 @@ export default function GeminiCanvasPage() {
                 <span className="text-xs text-slate-500">読み込み後に構図タグを自動解析します</span>
               </button>
             ) : (
-              <div className="relative h-full min-h-[28rem] w-full bg-black">
+              <div ref={comparisonRef} className="relative h-full min-h-[28rem] w-full bg-black">
                 <img src={sourceUrl} alt="変換前" className="absolute inset-0 h-full w-full object-contain" />
                 {resultUrl && (
                   <img
@@ -336,11 +372,29 @@ export default function GeminiCanvasPage() {
                     style={{ clipPath: `inset(0 ${100 - slider}% 0 0)` }}
                   />
                 )}
-                {resultUrl && <div className="pointer-events-none absolute inset-y-0 w-0.5 bg-white shadow" style={{ left: `${slider}%` }} />}
                 {resultUrl && (
-                  <input aria-label="変換前後の比較位置" type="range" min="0" max="100" value={slider} onChange={(event) => setSlider(Number(event.target.value))} className="absolute inset-0 h-full w-full cursor-ew-resize opacity-0" />
+                  <>
+                    <div className="pointer-events-none absolute inset-y-0 z-10 w-0.5 -translate-x-1/2 bg-white shadow-[0_0_8px_rgba(0,0,0,0.8)]" style={{ left: `${slider}%` }}>
+                      <span className="absolute left-1/2 top-1/2 flex h-11 w-11 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 border-white bg-slate-900/90 text-lg font-bold text-white shadow-lg">↔</span>
+                    </div>
+                    <div
+                      role="slider"
+                      tabIndex={0}
+                      aria-label="変換前後の比較位置"
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-valuenow={Math.round(slider)}
+                      onPointerDown={handleSliderPointerDown}
+                      onPointerMove={handleSliderPointerMove}
+                      onKeyDown={handleSliderKeyDown}
+                      className="absolute inset-0 z-10 cursor-ew-resize touch-none outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-400"
+                    >
+                      <span className="pointer-events-none absolute left-3 top-3 rounded bg-black/65 px-2 py-1 text-xs font-semibold text-white">変換後</span>
+                      <span className="pointer-events-none absolute right-3 top-3 rounded bg-black/65 px-2 py-1 text-xs font-semibold text-white">変換前</span>
+                    </div>
+                  </>
                 )}
-                <button type="button" onClick={() => fileInputRef.current?.click()} className="absolute bottom-3 right-3 rounded-lg bg-black/70 px-3 py-2 text-xs font-semibold text-white backdrop-blur hover:bg-black/90">
+                <button type="button" onClick={() => fileInputRef.current?.click()} className="absolute bottom-3 right-3 z-20 rounded-lg bg-black/70 px-3 py-2 text-xs font-semibold text-white backdrop-blur hover:bg-black/90">
                   画像を変更
                 </button>
               </div>
@@ -383,10 +437,10 @@ export default function GeminiCanvasPage() {
               </div>
             ) : (
               <div className="flex flex-col gap-4">
-                <Field label="シチュエーション / 構図" hint="(API自動解析結果)" rows={4} value={situation} onChange={setSituation} />
-                <Field label="スタイル / 体型" hint="(固定推奨)" rows={2} value={style} onChange={setStyle} />
-                <Field label="顔 / 表情・品質" hint="(可変)" rows={3} value={face} onChange={setFace} />
-                <Field label="除外要素" rows={3} value={negative} onChange={setNegative} />
+                <Field label="シチュエーション / 構図" hint="(API自動解析結果・編集可)" rows={4} value={situation} onChange={setSituation} placeholder="画像を読み込むと構図タグが自動入力されます。" />
+                <Field label="スタイル / 体型" hint="(任意)" rows={2} value={style} onChange={setStyle} placeholder="例: anime illustration, mature adult proportions" />
+                <Field label="顔 / 表情・品質" hint="(任意)" rows={3} value={face} onChange={setFace} placeholder="例: gentle expression, detailed shading" />
+                <Field label="除外要素" hint="(任意)" rows={3} value={negative} onChange={setNegative} placeholder="例: deformed anatomy, poorly drawn hands" />
               </div>
             )}
 
