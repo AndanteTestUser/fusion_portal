@@ -127,15 +127,25 @@ export function estimateBanzaiTargets({ head, leftShoulder, rightShoulder, torso
   };
 }
 
-export function makePoseGuide(image, landmarks, targets) {
+// `elbows` is optional and per-side ({ leftElbow, rightElbow }). A side with
+// no entry draws exactly the single straight shoulder-to-hand line this
+// function always drew before elbow bending existed; a side with one draws a
+// two-segment line through that bend point instead, with its own marker
+// circle so the image AI can see where to bend.
+export function makePoseGuide(image, landmarks, targets, elbows) {
   const guide = copyCanvas(image);
   const ctx = guide.getContext('2d');
   const width = Math.max(12, image.width / 90);
   ctx.strokeStyle = '#00ff33'; ctx.fillStyle = '#00ff33';
-  ctx.lineWidth = width; ctx.lineCap = 'round';
+  ctx.lineWidth = width; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
   for (const [side, hand] of [['left', targets.leftHand], ['right', targets.rightHand]]) {
     const shoulder = landmarks[`${side}Shoulder`];
-    ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(hand.x, hand.y); ctx.stroke();
+    const bend = elbows?.[`${side}Elbow`];
+    ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y);
+    if (bend) ctx.lineTo(bend.x, bend.y);
+    ctx.lineTo(hand.x, hand.y);
+    ctx.stroke();
+    if (bend) { ctx.beginPath(); ctx.arc(bend.x, bend.y, width * 0.9, 0, Math.PI * 2); ctx.fill(); }
     ctx.beginPath(); ctx.arc(hand.x, hand.y, width * 1.2, 0, Math.PI * 2); ctx.fill();
   }
   return guide;
@@ -178,8 +188,27 @@ const POSE_SCHEMA = {
     occluders: {
       type: 'array', items: {
         type: 'object', additionalProperties: false,
-        properties: { description: { type: 'string' }, polygon: { type: 'array', items: POINT_SCHEMA } },
-        required: ['description', 'polygon'],
+        properties: {
+          description: { type: 'string' },
+          polygon: { type: 'array', items: POINT_SCHEMA },
+          // An occluder's own outer silhouette can have gaps inside it where
+          // background or the lying subject's own body is visible (the space
+          // between two limbs, an armpit notch, between spread fingers). A
+          // single outer polygon has no way to represent that: filling it
+          // solid swallows those gaps whole, and createAutomaticPlan's
+          // removal-mask dilation swallows even more of them. holes lets the
+          // analysis mark each such gap as its own polygon so
+          // createAutomaticPlan can punch it back out of both the removal
+          // and the restore mask.
+          holes: {
+            type: 'array', items: {
+              type: 'object', additionalProperties: false,
+              properties: { polygon: { type: 'array', items: POINT_SCHEMA } },
+              required: ['polygon'],
+            },
+          },
+        },
+        required: ['description', 'polygon', 'holes'],
       },
     },
   },
@@ -197,6 +226,9 @@ function normalizePose(value) {
     occluders: Array.isArray(value.occluders) ? value.occluders.map((item) => ({
       description: String(item?.description || ''),
       polygon: Array.isArray(item?.polygon) ? item.polygon.map(point) : [],
+      holes: Array.isArray(item?.holes) ? item.holes.map((hole) => ({
+        polygon: Array.isArray(hole?.polygon) ? hole.polygon.map(point) : [],
+      })).filter((hole) => hole.polygon.length >= 3) : [],
     })).filter((item) => item.polygon.length >= 3) : [],
   };
   for (const name of ['head', 'torso', 'leftShoulder', 'rightShoulder', 'leftElbow', 'rightElbow', 'leftWrist', 'rightWrist']) normalized[name] = point(value[name]);
@@ -247,7 +279,7 @@ async function providerFetch(url, options, label) {
 
 export async function analyzePoseWithProvider({ provider, key, image, signal }) {
   if (!key) throw new Error(`${provider === 'openai' ? 'OpenAI' : 'Gemini'}のAPIキーを設定してください`);
-  const instruction = `Analyze the main reclining or lying person whose arms should be changed to a fully extended overhead banzai pose. Return coordinates normalized from 0 to 1000 relative to the full image. Estimate hidden joints. left/right mean the person's anatomical sides. Identify only foreground people or objects covering this subject or either arm path as occluders, tracing each visible boundary with a tight polygon of 6 to 20 points. Never classify the subject's own body or clothes as an occluder. If no suitable person exists, set found=false. confidence must be 0 to 1.`;
+  const instruction = `Analyze the main reclining or lying person whose arms should be changed to a fully extended overhead banzai pose. Return coordinates normalized from 0 to 1000 relative to the full image. Estimate hidden joints. left/right mean the person's anatomical sides. Identify only foreground people or objects covering this subject or either arm path as occluders, tracing each visible boundary with a tight polygon of 6 to 20 points. Never classify the subject's own body or clothes as an occluder. An occluder's own outline can have a gap inside it where the background or the lying subject's own body is visible through it — for example the narrow space between two limbs, an armpit notch, or the gap between spread fingers. For every such gap fully or mostly enclosed by that occluder's outline, trace it as its own tight polygon in that occluder's holes array so it is never treated as part of the occluder; leave holes empty when the outline has no such gap. If no suitable person exists, set found=false. confidence must be 0 to 1.`;
   // Analysis does not need edit-resolution pixels. A smaller JPEG avoids large
   // base64 request bodies that frequently fail in iOS/Safari.
   const imageDataUrl = analysisImageDataUrl(image);
@@ -442,6 +474,28 @@ export function createAutomaticPlan(image, analysis) {
     for (const point of polygon.slice(1)) { occCtx.lineTo(point.x, point.y); occCoreCtx.lineTo(point.x, point.y); }
     occCtx.closePath(); occCtx.fill(); occCtx.stroke();
     occCoreCtx.closePath(); occCoreCtx.fill();
+  }
+  // A gap inside an occluder's own outline (the narrow space between two
+  // limbs, an armpit notch) is real background or the lying subject's own
+  // body, never the occluder — punch every hole out of both masks only
+  // after every occluder polygon above has been filled, so a hole from one
+  // occluder can never be re-covered by a later, unrelated occluder's own
+  // fill. This also reopens any gap the removal mask's dilation above would
+  // otherwise have swallowed, since destination-out here uses the hole
+  // polygon as traced, unaffected by that dilation.
+  for (const item of analysis.occluders || []) {
+    for (const hole of item.holes || []) {
+      const holePolygon = hole.polygon.map((point) => fromNormalized(point, image));
+      if (holePolygon.length < 3) continue;
+      for (const ctx of [occCtx, occCoreCtx]) {
+        ctx.save();
+        ctx.globalCompositeOperation = 'destination-out';
+        ctx.beginPath(); ctx.moveTo(holePolygon[0].x, holePolygon[0].y);
+        for (const point of holePolygon.slice(1)) ctx.lineTo(point.x, point.y);
+        ctx.closePath(); ctx.fill();
+        ctx.restore();
+      }
+    }
   }
   // The arm edit mask is never touched by the occluder, here or anywhere
   // else it's built. Carving the occluder out of it was tried and reverted:

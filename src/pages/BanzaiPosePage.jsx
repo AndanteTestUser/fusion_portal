@@ -8,7 +8,11 @@ import {
 } from '../lib/banzaiPipeline.js';
 
 const LANDMARKS = ['head', 'torso', 'leftShoulder', 'rightShoulder'];
-const LABELS = { head: '頭の中心', torso: '胴体の中心', leftShoulder: '左肩', rightShoulder: '右肩', leftHand: '左手の目標', rightHand: '右手の目標' };
+const LABELS = {
+  head: '頭の中心', torso: '胴体の中心', leftShoulder: '左肩', rightShoulder: '右肩',
+  leftHand: '左手の目標', rightHand: '右手の目標',
+  leftElbow: '左肘を曲げる位置', rightElbow: '右肘を曲げる位置',
+};
 const MAX_SIDE = 2048;
 
 function download(canvas, name) {
@@ -65,7 +69,29 @@ export default function BanzaiPosePage() {
   const [pointMode, setPointMode] = useState(null);
   const [landmarks, setLandmarks] = useState({});
   const [handOverrides, setHandOverrides] = useState({});
+  // Optional per-side elbow bend point for the manual "腕の方向" stage only.
+  // Unset (the default) means exactly today's behavior: makePoseGuide and
+  // addTargetCorridors draw a single straight shoulder-to-hand line/corridor
+  // for that side, byte-for-byte the same as before this existed. Setting
+  // one bends that side's guide line and corridor through the marked point
+  // instead. The fully automatic pipeline (runAutomatic) never reads this
+  // state, so it stays unaffected regardless of what's set here.
+  const [elbowTargets, setElbowTargets] = useState({});
   const [finishing, setFinishing] = useState(false);
+  // General-purpose touch-up: unlike the finishing eraser above (which only
+  // re-draws the boundary between two already-rendered layers), this sends
+  // a user-painted region plus a short free-text instruction to the image
+  // AI as a fresh edit. It exists because the pipeline's automatic masks
+  // (arms, occluder) only ever cover what the automatic analysis predicted
+  // needs editing — anything the user notices afterward outside those
+  // regions (e.g. a limb or the torso not actually resting on the surface
+  // beneath it) has no other path to a fix. Contact with the floor/mat is
+  // not always correct or required (a genuinely airborne pose is fine); this
+  // is not an automatic check for it, just a way to act once a person has
+  // judged something looks wrong.
+  const [retouching, setRetouching] = useState(false);
+  const [retouchPrompt, setRetouchPrompt] = useState('');
+  const [hasRetouchPreview, setHasRetouchPreview] = useState(false);
   const [version, setVersion] = useState(0);
   const originalRef = useRef(null);
   const workingRef = useRef(null);
@@ -87,6 +113,8 @@ export default function BanzaiPosePage() {
   // between them needs adjusting.
   const preRestoreRef = useRef(null);
   const finishMaskRef = useRef(null);
+  const retouchMaskRef = useRef(null);
+  const retouchPreviewRef = useRef(null);
   const canvasRef = useRef(null);
   const pointerRef = useRef(null);
   const abortRef = useRef(null);
@@ -99,7 +127,9 @@ export default function BanzaiPosePage() {
   const estimated = estimateBanzaiTargets(landmarks);
   const targets = estimated ? { ...estimated, ...handOverrides } : null;
   const activeMask = stage === 'occluder' ? occluderRef.current : armsRef.current;
-  const activeImage = preview ? pendingRef.current : workingRef.current;
+  const activeImage = preview
+    ? pendingRef.current
+    : retouching && hasRetouchPreview ? retouchPreviewRef.current : workingRef.current;
 
   useEffect(() => { advancedRef.current = advanced; }, [advanced]);
 
@@ -123,6 +153,12 @@ export default function BanzaiPosePage() {
       ctx.drawImage(finishMaskRef.current, 0, 0);
       ctx.restore();
     }
+    if (retouching && !hasRetouchPreview && retouchMaskRef.current) {
+      ctx.save();
+      ctx.globalAlpha = 0.4;
+      ctx.drawImage(retouchMaskRef.current, 0, 0);
+      ctx.restore();
+    }
     if (advanced && stage === 'arms' && targets && !preview) {
       ctx.save();
       ctx.strokeStyle = '#22c55e';
@@ -130,7 +166,12 @@ export default function BanzaiPosePage() {
       ctx.lineWidth = Math.max(3, image.width / 400);
       for (const [side, hand] of [['left', targets.leftHand], ['right', targets.rightHand]]) {
         const shoulder = landmarks[`${side}Shoulder`];
-        ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(hand.x, hand.y); ctx.stroke();
+        const bend = elbowTargets[`${side}Elbow`];
+        ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y);
+        if (bend) ctx.lineTo(bend.x, bend.y);
+        ctx.lineTo(hand.x, hand.y);
+        ctx.stroke();
+        if (bend) { ctx.beginPath(); ctx.arc(bend.x, bend.y, Math.max(4, image.width / 260), 0, 2 * Math.PI); ctx.fill(); }
         ctx.beginPath(); ctx.arc(hand.x, hand.y, Math.max(5, image.width / 200), 0, 2 * Math.PI); ctx.fill();
       }
       ctx.restore();
@@ -143,7 +184,7 @@ export default function BanzaiPosePage() {
         ctx.fillText(LABELS[name], point.x + 9, point.y - 9);
       }
     }
-  }, [version, stage, preview, advanced, finishing, activeImage, activeMask, landmarks, targets?.leftHand.x, targets?.leftHand.y, targets?.rightHand.x, targets?.rightHand.y]);
+  }, [version, stage, preview, advanced, finishing, retouching, hasRetouchPreview, activeImage, activeMask, landmarks, elbowTargets, targets?.leftHand.x, targets?.leftHand.y, targets?.rightHand.x, targets?.rightHand.y]);
 
   async function runAutomatic(image) {
     const key = entries[provider]?.apiKey;
@@ -154,7 +195,7 @@ export default function BanzaiPosePage() {
     }
     const controller = new AbortController();
     abortRef.current = controller;
-    setAdvanced(false); setPreview(false); setFinishing(false); setBusy(true); setStage('analyzing');
+    setAdvanced(false); setPreview(false); setFinishing(false); setRetouching(false); setBusy(true); setStage('analyzing');
     setMessage('対象人物・両腕・前面の遮蔽物を自動解析しています…');
     try {
       const analysis = await analyzePoseWithProvider({ provider, key, image, signal: controller.signal });
@@ -254,7 +295,10 @@ export default function BanzaiPosePage() {
     manualTouchedRef.current = { occluder: false, arms: false, points: false };
     preRestoreRef.current = null;
     finishMaskRef.current = null;
-    setLandmarks({}); setHandOverrides({}); setPreview(false); setAdvanced(false); setFinishing(false);
+    retouchMaskRef.current = null;
+    retouchPreviewRef.current = null;
+    setLandmarks({}); setHandOverrides({}); setElbowTargets({}); setPreview(false); setAdvanced(false); setFinishing(false);
+    setRetouching(false); setHasRetouchPreview(false); setRetouchPrompt('');
     setVersion((v) => v + 1);
     runAutomatic(image);
   }
@@ -327,15 +371,22 @@ export default function BanzaiPosePage() {
     setVersion((v) => v + 1);
   };
 
+  const retouchStroke = (from, to) => {
+    paintStroke(retouchMaskRef.current, from, to);
+    setVersion((v) => v + 1);
+  };
+
   const pointerDown = (event) => {
     if (busy || preview || !workingRef.current) return;
-    if (!advanced && !finishing) return;
+    if (!advanced && !finishing && !(retouching && !hasRetouchPreview)) return;
     event.currentTarget.setPointerCapture(event.pointerId);
     const at = position(event);
     if (finishing) { pointerRef.current = at; finishStroke(at, at); return; }
+    if (retouching) { if (!hasRetouchPreview) { pointerRef.current = at; retouchStroke(at, at); } return; }
     if (pointMode) {
       manualTouchedRef.current.points = true;
       if (pointMode.endsWith('Hand')) setHandOverrides((current) => ({ ...current, [pointMode]: at }));
+      else if (pointMode.endsWith('Elbow')) setElbowTargets((current) => ({ ...current, [pointMode]: at }));
       else setLandmarks((current) => ({ ...current, [pointMode]: at }));
       setPointMode(null);
     } else { pointerRef.current = at; stroke(at, at); }
@@ -344,6 +395,7 @@ export default function BanzaiPosePage() {
     if (!pointerRef.current || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
     const at = position(event);
     if (finishing) { finishStroke(pointerRef.current, at); pointerRef.current = at; return; }
+    if (retouching) { retouchStroke(pointerRef.current, at); pointerRef.current = at; return; }
     stroke(pointerRef.current, at);
     pointerRef.current = at;
   };
@@ -367,7 +419,16 @@ export default function BanzaiPosePage() {
         ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(elbow.x, elbow.y); ctx.lineTo(wrist.x, wrist.y); ctx.stroke();
         ctx.beginPath(); ctx.arc(wrist.x, wrist.y, width * 1.1, 0, Math.PI * 2); ctx.fill();
       }
-      ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(hand.x, hand.y); ctx.stroke();
+      // An optional user-marked bend point for the NEW pose (as opposed to
+      // `elbow` above, which is the OLD pose's AI-estimated elbow used only
+      // to cover the arm being replaced). Unset, this is exactly the prior
+      // single straight shoulder-to-hand corridor.
+      const bend = elbowTargets[`${side}Elbow`];
+      ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y);
+      if (bend) ctx.lineTo(bend.x, bend.y);
+      ctx.lineTo(hand.x, hand.y);
+      ctx.stroke();
+      if (bend) { ctx.beginPath(); ctx.arc(bend.x, bend.y, width * 1.1, 0, Math.PI * 2); ctx.fill(); }
       // The corridor's round cap at the target is only as wide as the
       // forearm; give the new hand the same buffer as the original wrist
       // above, or it gets clipped off by the mask boundary during composite.
@@ -425,8 +486,8 @@ export default function BanzaiPosePage() {
     try {
       const prompt = stage === 'occluder'
         ? 'Remove only the foreground occluding person or object inside the transparent mask. Complete the hidden surface and the background in the same camera angle, style and lighting. This is a temporary edit base; preserve the lying subject, their pose, all unmasked pixels, furniture and canvas framing.'
-        : `Edit only the lying subject's two arms into a fully extended, anatomically natural overhead banzai pose in the direction of their head. The second input image is a pose guide with green lines from each shoulder toward a virtual target. Use those lines for the arm paths, but do not render the green lines. Where the target lands inside the frame, draw a complete, clearly visible hand there — an open hand or a loose fist, with individual fingers or knuckle shapes like a real hand, not a blurred stub, a tapering sleeve, or the arm simply fading into empty space; draw the hand even where nothing is behind it to anchor it against. A target may be outside the crop: in that case, continue the arm naturally through the image edge and keep the hand out of frame instead of bending or shortening the arm. The head is at (${Math.round(landmarks.head.x)},${Math.round(landmarks.head.y)}), torso at (${Math.round(landmarks.torso.x)},${Math.round(landmarks.torso.y)}). Match shoulder joints and perspective, not equal lengths in image pixels. Remove traces of the old arm pose inside the mask, including any disconnected hand or finger fragments left outside the new pose. Respect gravity: wherever a continuous supporting surface (mat, floor, bed, cushion) is actually visible directly beneath an arm's path, let that forearm and hand rest against it with a matching contact shadow and perspective instead of floating; where no such surface is visible under the path (it leaves frame, crosses open air, or the subject is not fully flat there), do not invent contact and let the arm continue naturally instead. Preserve the subject's face, torso, clothing, other people, scene, camera, framing and proportions.`;
-      const guide = stage === 'arms' ? makePoseGuide(workingRef.current, landmarks, targets) : null;
+        : `Edit only the lying subject's two arms into a fully extended, anatomically natural overhead banzai pose in the direction of their head. The second input image is a pose guide with green lines from each shoulder toward a virtual target. Use those lines for the arm paths, but do not render the green lines. Each line is straight unless it has a small green circle partway along it marking a bend point — where a bend is marked, bend that arm's elbow to pass exactly through the marked point instead of keeping it straight; where no bend is marked on a line, keep that arm fully extended and straight, exactly as before. Where the target lands inside the frame, draw a complete, clearly visible hand there — an open hand or a loose fist, with individual fingers or knuckle shapes like a real hand, not a blurred stub, a tapering sleeve, or the arm simply fading into empty space; draw the hand even where nothing is behind it to anchor it against. A target may be outside the crop: in that case, continue the arm naturally through the image edge and keep the hand out of frame instead of bending anywhere the guide doesn't mark or shortening the arm. The head is at (${Math.round(landmarks.head.x)},${Math.round(landmarks.head.y)}), torso at (${Math.round(landmarks.torso.x)},${Math.round(landmarks.torso.y)}). Match shoulder joints and perspective, not equal lengths in image pixels. Remove traces of the old arm pose inside the mask, including any disconnected hand or finger fragments left outside the new pose. Respect gravity independently for each segment of an arm's path (the whole arm if straight, or the upper-arm and forearm segments separately if bent at a marked point): wherever a continuous supporting surface (mat, floor, bed, cushion) is actually visible directly beneath a given segment, let that segment and, for the segment ending at the hand, the hand itself rest against it with a matching contact shadow and perspective instead of floating; where no such surface is visible beneath a given segment (it leaves frame, crosses open air, or the subject is not fully flat there), do not invent contact for that segment and let the arm continue naturally instead. Preserve the subject's face, torso, clothing, other people, scene, camera, framing and proportions.`;
+      const guide = stage === 'arms' ? makePoseGuide(workingRef.current, landmarks, targets, elbowTargets) : null;
       const generated = await editWithProvider({ provider, key, image: workingRef.current, selection: selected, guide, prompt, signal: controller.signal });
       pendingRef.current = composeSelected(workingRef.current, generated, selected);
       if (selectedChangeRatio(workingRef.current, pendingRef.current, selected) < 0.005) {
@@ -495,6 +556,78 @@ export default function BanzaiPosePage() {
 
   const revise = () => { pendingRef.current = null; setPreview(false); setVersion((v) => v + 1); };
 
+  const retouchStart = () => {
+    const image = workingRef.current;
+    if (!image) return;
+    retouchMaskRef.current = makeCanvas(image.width, image.height);
+    retouchPreviewRef.current = null;
+    setHasRetouchPreview(false);
+    setRetouchPrompt('');
+    setRetouching(true);
+    setMode('paint');
+    setMessage('直したい範囲を塗り、直したい内容を短く入力してから生成してください。');
+    setVersion((v) => v + 1);
+  };
+
+  const retouchClose = () => {
+    setRetouching(false);
+    retouchMaskRef.current = null;
+    retouchPreviewRef.current = null;
+    setHasRetouchPreview(false);
+    setRetouchPrompt('');
+    setVersion((v) => v + 1);
+  };
+
+  // A general free-form edit, unlike run()/accept() above which always send
+  // one of the pipeline's own fixed prompts (occluder removal or the banzai
+  // arm pose). This exists for whatever the user notices is wrong in the
+  // finished image that the automatic masks never covered — the prompt and
+  // the selected region are both theirs to choose, so it is not limited to
+  // arms, occluders, or floor contact specifically.
+  const retouchRun = async () => {
+    if (!maskHasPaint(retouchMaskRef.current)) return setMessage('直したい範囲を塗ってください。');
+    if (!retouchPrompt.trim()) return setMessage('直したい内容を短く入力してください。');
+    const key = entries[provider]?.apiKey;
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setBusy(true);
+    setMessage(`${provider === 'openai' ? 'OpenAI' : 'Gemini'}で選択範囲を修正中…`);
+    try {
+      const generated = await editWithProvider({
+        provider, key, image: workingRef.current, selection: retouchMaskRef.current, signal: controller.signal,
+        prompt: `Edit only the pixels inside the transparent area of the mask. ${retouchPrompt.trim()} Keep every pixel outside the mask exactly as it is, and preserve the camera angle, perspective, lighting and style.`,
+      });
+      const result = composeSelected(workingRef.current, generated, retouchMaskRef.current);
+      if (selectedChangeRatio(workingRef.current, result, retouchMaskRef.current) < 0.005) throw new Error('選択範囲の変化を確認できませんでした。範囲や指示を見直して再実行してください');
+      retouchPreviewRef.current = result;
+      setHasRetouchPreview(true);
+      setMessage('修正結果のプレビューです。問題なければ採用してください。');
+      setVersion((v) => v + 1);
+    } catch (error) {
+      setMessage(error.name === 'AbortError' ? '処理を中止しました。' : `修正に失敗しました: ${error.message}`);
+    } finally {
+      setBusy(false); abortRef.current = null;
+    }
+  };
+
+  const retouchAccept = () => {
+    if (!retouchPreviewRef.current) return;
+    workingRef.current = retouchPreviewRef.current;
+    retouchPreviewRef.current = null;
+    retouchMaskRef.current = makeCanvas(workingRef.current.width, workingRef.current.height);
+    setHasRetouchPreview(false);
+    setRetouchPrompt('');
+    setMessage('選択範囲の修正を反映しました。続けて別の箇所も直せます。');
+    setVersion((v) => v + 1);
+  };
+
+  const retouchRevise = () => {
+    retouchPreviewRef.current = null;
+    setHasRetouchPreview(false);
+    setMessage('プレビューを破棄しました。範囲か指示を見直して再生成してください。');
+    setVersion((v) => v + 1);
+  };
+
   const openAdvanced = () => {
     const image = originalRef.current;
     if (!image) return;
@@ -512,6 +645,7 @@ export default function BanzaiPosePage() {
       pendingRef.current = draft.pending ? copyCanvas(draft.pending) : null;
       setLandmarks(draft.landmarks);
       setHandOverrides(draft.handOverrides);
+      setElbowTargets(draft.elbowTargets || {});
       setStage(draft.stage);
       setPreview(Boolean(draft.pending));
       setMessage('前回の詳細調整を復元しました。続きから作業できます。');
@@ -524,6 +658,7 @@ export default function BanzaiPosePage() {
       pendingRef.current = null;
       setLandmarks(plan?.landmarks || {});
       setHandOverrides(plan?.targets || {});
+      setElbowTargets({});
       setStage('occluder');
       setPreview(false);
       setMessage(busy
@@ -533,6 +668,7 @@ export default function BanzaiPosePage() {
     advancedRef.current = true;
     setAdvanced(true);
     setFinishing(false);
+    setRetouching(false);
     setVersion((v) => v + 1);
   };
 
@@ -554,6 +690,7 @@ export default function BanzaiPosePage() {
         pending: pendingRef.current ? copyCanvas(pendingRef.current) : null,
         landmarks: { ...landmarks },
         handOverrides: { ...handOverrides },
+        elbowTargets: { ...elbowTargets },
         stage,
       };
     }
@@ -571,6 +708,7 @@ export default function BanzaiPosePage() {
     setPreview(false);
     setAdvanced(false);
     setFinishing(false);
+    setRetouching(false);
     setPointMode(null);
     setVersion((v) => v + 1);
   };
@@ -635,6 +773,13 @@ export default function BanzaiPosePage() {
               className={`rounded px-3 py-2 ${pointMode === name ? 'bg-amber-600' : 'bg-slate-600'}`}
               onClick={() => setPointMode(name)}>{LABELS[name]}を直す{handOverrides[name] ? ' ✓' : ''}</button>)}
               {Object.keys(handOverrides).length > 0 && <button className="rounded bg-slate-600 px-3 py-2" onClick={() => setHandOverrides({})}>手先を自動位置に戻す</button>}</div>}
+            {targets && <div className="space-y-1">
+              <p className="text-xs text-slate-300">通常はまっすぐ伸ばします。曲げたい場合だけ、曲げたい位置を指定してください。</p>
+              <div className="flex flex-wrap gap-2">{['leftElbow', 'rightElbow'].map((name) => <button key={name}
+                className={`rounded px-3 py-2 ${pointMode === name ? 'bg-amber-600' : 'bg-slate-600'}`}
+                onClick={() => setPointMode(name)}>{LABELS[name]}{elbowTargets[name] ? ' ✓' : ''}</button>)}
+                {Object.keys(elbowTargets).length > 0 && <button className="rounded bg-slate-600 px-3 py-2" onClick={() => setElbowTargets({})}>肘の指定を解除（まっすぐに戻す）</button>}</div>
+            </div>}
             <div className="flex flex-wrap gap-2">
               <button className="rounded bg-emerald-700 px-3 py-2" onClick={addTargetCorridors}>腕の編集範囲を自動更新</button>
               <button className="rounded bg-slate-600 px-3 py-2" onClick={() => extendTargetOutside('left')}>左腕を画面外へ伸ばす</button>
@@ -690,9 +835,43 @@ export default function BanzaiPosePage() {
             <button className="rounded bg-green-700 px-4 py-2" onClick={() => setFinishing(false)}>調整を完了</button>
           </div>
         </div>}
-        {stage === 'done' && !finishing && <div className="flex flex-wrap gap-2 rounded-xl bg-slate-800 p-4">
+        {stage === 'done' && retouching && <div className="space-y-3 rounded-xl bg-slate-800 p-3">
+          <div>
+            <p className="font-semibold">気になる箇所を直す</p>
+            <p className="mt-1 text-xs text-slate-300">
+              自動処理の範囲外でも、床・マットへの接地のように見た目で気になった箇所を自由に選んで直せます。
+              直したい範囲を塗り、直したい内容を一言入力して生成してください。自動チェックの対象外なので、結果は必ず目視で確認してください。
+            </p>
+          </div>
+          {!hasRetouchPreview && <>
+            <div className="flex flex-wrap items-center gap-2">
+              <button aria-pressed={mode === 'paint'} className={`rounded px-3 py-2 ${mode === 'paint' ? 'bg-rose-600' : 'bg-slate-600'}`} onClick={() => setMode('paint')}>＋ 範囲を追加</button>
+              <button aria-pressed={mode === 'erase'} className={`rounded px-3 py-2 ${mode === 'erase' ? 'bg-rose-600' : 'bg-slate-600'}`} onClick={() => setMode('erase')}>－ 範囲を除外</button>
+              <label className="flex items-center gap-2 text-sm">太さ <input aria-label="ブラシの太さ" type="range" min="8" max="100" value={brush} onChange={(e) => setBrush(Number(e.target.value))} /></label>
+              <button className="rounded bg-slate-600 px-3 py-2" onClick={() => {
+                retouchMaskRef.current.getContext('2d').clearRect(0, 0, retouchMaskRef.current.width, retouchMaskRef.current.height);
+                setVersion((v) => v + 1);
+              }}>選択を消去</button>
+            </div>
+            <textarea className="w-full rounded bg-slate-700 p-2 text-sm" rows={2}
+              placeholder="例: 体とマットが実際に接地するように、影も含めて自然に直してください"
+              value={retouchPrompt} onChange={(e) => setRetouchPrompt(e.target.value)} />
+            <div className="flex flex-wrap gap-2 border-t border-slate-600 pt-3">
+              <button disabled={busy} className="rounded bg-blue-600 px-4 py-2 font-medium disabled:opacity-50" onClick={retouchRun}>{busy ? '生成中…' : 'この内容で生成'}</button>
+              {busy && <button className="rounded bg-slate-600 px-4 py-2" onClick={() => abortRef.current?.abort()}>処理を中止</button>}
+              <button disabled={busy} className="rounded bg-slate-600 px-4 py-2 disabled:opacity-50" onClick={retouchClose}>やめる</button>
+            </div>
+          </>}
+          {hasRetouchPreview && <div className="flex flex-wrap gap-2 border-t border-slate-600 pt-3">
+            <button className="rounded bg-green-700 px-4 py-2" onClick={retouchAccept}>この結果を採用</button>
+            <button className="rounded bg-slate-600 px-4 py-2" onClick={retouchRevise}>やり直す</button>
+            <button className="rounded bg-slate-600 px-4 py-2" onClick={() => download(retouchPreviewRef.current, 'banzai_retouch_preview.png')}>途中画像を保存</button>
+          </div>}
+        </div>}
+        {stage === 'done' && !finishing && !retouching && <div className="flex flex-wrap gap-2 rounded-xl bg-slate-800 p-4">
           <button className="rounded bg-green-700 px-4 py-2" onClick={() => download(workingRef.current, 'banzai_result.png')}>完成画像を保存</button>
           <button className="rounded bg-amber-700 px-4 py-2" onClick={() => setFinishing(true)}>仕上がりを微調整</button>
+          <button className="rounded bg-amber-700 px-4 py-2" onClick={retouchStart}>気になる箇所を直す</button>
           {!advanced && <button className="rounded bg-blue-700 px-4 py-2" onClick={() => runAutomatic(originalRef.current)}>同じ原画像でもう一度</button>}
           {!advanced && <button className="rounded bg-slate-600 px-4 py-2" onClick={openAdvanced}>詳細調整</button>}
           {advanced && <button className="rounded bg-slate-600 px-4 py-2" onClick={closeAdvanced}>調整を終了して通常画面へ</button>}
