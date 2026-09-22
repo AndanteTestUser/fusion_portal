@@ -385,9 +385,14 @@ export default function SettingsPage() {
 
         {vaultState === 'none' && (
           <div className="flex flex-col gap-3">
-            <div className="flex flex-col gap-2">
+            <form
+              className="flex flex-col gap-2"
+              onSubmit={(e) => { e.preventDefault(); handleCreatePassphraseVault(); }}
+            >
               <input
                 type="password"
+                name="vault-new-passphrase"
+                autoComplete="new-password"
                 className="rounded border border-neutral-600 bg-neutral-900 px-3 py-2 text-sm text-white"
                 placeholder={`パスフレーズ(${MIN_PASSPHRASE_LENGTH}文字以上)`}
                 value={passphraseInput}
@@ -395,15 +400,17 @@ export default function SettingsPage() {
               />
               <input
                 type="password"
+                name="vault-new-passphrase-confirm"
+                autoComplete="new-password"
                 className="rounded border border-neutral-600 bg-neutral-900 px-3 py-2 text-sm text-white"
                 placeholder="パスフレーズ(確認)"
                 value={passphraseConfirm}
                 onChange={(e) => setPassphraseConfirm(e.target.value)}
               />
-              <button type="button" className="btn" onClick={handleCreatePassphraseVault} disabled={vaultBusy}>
+              <button type="submit" className="btn" disabled={vaultBusy}>
                 🔑 パスフレーズでVaultを作成
               </button>
-            </div>
+            </form>
             {isPasskeySupported() && (
               <button type="button" className="btn" onClick={handleCreatePasskeyVault} disabled={vaultBusy}>
                 👆 パスキーでVaultを作成
@@ -415,18 +422,23 @@ export default function SettingsPage() {
         {vaultState === 'locked' && (
           <div className="flex flex-col gap-3">
             {hasPassphraseWrap && (
-              <div className="flex gap-2">
+              <form
+                className="flex gap-2"
+                onSubmit={(e) => { e.preventDefault(); handleUnlockWithPassphrase(); }}
+              >
                 <input
                   type="password"
+                  name="vault-passphrase"
+                  autoComplete="current-password"
                   className="min-w-0 flex-1 rounded border border-neutral-600 bg-neutral-900 px-3 py-2 text-sm text-white"
                   placeholder="パスフレーズ"
                   value={unlockPassphraseInput}
                   onChange={(e) => setUnlockPassphraseInput(e.target.value)}
                 />
-                <button type="button" className="btn" onClick={handleUnlockWithPassphrase} disabled={vaultBusy}>
+                <button type="submit" className="btn" disabled={vaultBusy}>
                   解錠
                 </button>
-              </div>
+              </form>
             )}
             {passkeyWraps.length > 0 && (
               <button type="button" className="btn" onClick={handleUnlockWithPasskey} disabled={vaultBusy}>
@@ -460,9 +472,14 @@ export default function SettingsPage() {
               ))}
             </ul>
 
-            <div className="flex flex-col gap-2">
+            <form
+              className="flex flex-col gap-2"
+              onSubmit={(e) => { e.preventDefault(); handleAddPassphrase(); }}
+            >
               <input
                 type="password"
+                name="vault-new-passphrase"
+                autoComplete="new-password"
                 className="rounded border border-neutral-600 bg-neutral-900 px-3 py-2 text-sm text-white"
                 placeholder={`新しいパスフレーズ(${MIN_PASSPHRASE_LENGTH}文字以上)`}
                 value={passphraseInput}
@@ -470,15 +487,17 @@ export default function SettingsPage() {
               />
               <input
                 type="password"
+                name="vault-new-passphrase-confirm"
+                autoComplete="new-password"
                 className="rounded border border-neutral-600 bg-neutral-900 px-3 py-2 text-sm text-white"
                 placeholder="パスフレーズ(確認)"
                 value={passphraseConfirm}
                 onChange={(e) => setPassphraseConfirm(e.target.value)}
               />
-              <button type="button" className="btn" onClick={handleAddPassphrase} disabled={vaultBusy}>
+              <button type="submit" className="btn" disabled={vaultBusy}>
                 🔑 パスフレーズを設定/変更
               </button>
-            </div>
+            </form>
 
             {isPasskeySupported() && (
               <button type="button" className="btn" onClick={handleAddPasskey} disabled={vaultBusy}>
