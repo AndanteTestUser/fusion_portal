@@ -417,17 +417,14 @@ export function createAutomaticPlan(image, analysis) {
     // hair, clothing edges and shadows are not left behind as fragments.
     occCtx.closePath(); occCtx.fill(); occCtx.stroke();
   }
-  // The occluder must always end up as the frontmost layer of the final
-  // composite, with nothing else ever allowed to sit in front of it —
-  // including the blank/background space the arm edit leaves behind at the
-  // old arm's original position. Carving the occluder out of the arm edit
-  // mask here, before any editing happens, is what guarantees that: the arm
-  // edit is never even asked to touch occluder territory, so there is no
-  // "old arm's empty space" for it to leave behind there in the first place,
-  // and restoreOccluder can safely restore the occluder unconditionally
-  // afterward with no exclusion logic of its own needed.
-  const armsFinal = subtractMask(arms, occluder);
-  return { landmarks, targets, joints, arms: armsFinal, occluder, confidence: analysis.confidence, summary: analysis.summary };
+  // The arm edit mask is never touched by the occluder. Carving the occluder
+  // out of it here was tried and reverted: it fragmented the mask handed to
+  // the arm-editing AI call, degrading or breaking the arm generation itself
+  // (visible at the "腕の方向" stage, before restoreOccluder even runs) —
+  // an effect that has no business happening outside the restore step
+  // ("確認・反映"). Whatever the occluder needs to guard against must be
+  // handled entirely inside restoreOccluder, never by altering this mask.
+  return { landmarks, targets, joints, arms, occluder, confidence: analysis.confidence, summary: analysis.summary };
 }
 
 async function responseError(response) {

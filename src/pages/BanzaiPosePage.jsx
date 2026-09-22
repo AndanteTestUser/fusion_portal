@@ -4,7 +4,7 @@ import { useWkAutoLoad } from '../hooks/useWkAutoLoad.js';
 import {
   analyzePoseWithProvider, composeSelected, copyCanvas, createAutomaticPlan, editWithProvider,
   estimateBanzaiTargets, makePoseGuide, makeCanvas, maskHasPaint, restoreOccluder,
-  selectedChangeRatio, subtractMask, verifyArmsRendered,
+  selectedChangeRatio, verifyArmsRendered,
 } from '../lib/banzaiPipeline.js';
 
 const LANDMARKS = ['head', 'torso', 'leftShoulder', 'rightShoulder'];
@@ -317,11 +317,11 @@ export default function BanzaiPosePage() {
       ctx.beginPath(); ctx.arc(hand.x, hand.y, width * 1.1, 0, Math.PI * 2); ctx.fill();
     }
     ctx.restore();
-    // The occluder must always end up as the frontmost layer of the final
-    // composite (see banzaiPipeline.js's restoreOccluder comment): carve it
-    // back out of this freshly-drawn corridor so a manual update never
-    // reopens edit-mask territory the automatic plan had already excluded.
-    armsRef.current = subtractMask(mask, occluderRef.current);
+    // The arm edit mask is never carved around the occluder here (or
+    // anywhere it's built) — see banzaiPipeline.js's createAutomaticPlan
+    // comment. Doing so fragments the mask handed to the arm-editing AI
+    // call and degrades the generation itself; whatever the occluder needs
+    // is handled entirely inside restoreOccluder, at the restore step.
     setMessage('肩から目標方向までの編集範囲を自動設定しました。通常はこのまま生成できます。');
     setVersion((v) => v + 1);
   };
