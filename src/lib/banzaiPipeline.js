@@ -184,8 +184,22 @@ const POSE_SCHEMA = {
         required: ['description', 'polygon'],
       },
     },
+    // The currently-visible outline of each of the subject's own arms, traced
+    // directly from the photo instead of guessed from the 3 joint points. See
+    // armsOldRegion below: a decreed geometric shape (stroke+circles through
+    // shoulder/elbow/wrist) drifts from the real arm whenever those estimated
+    // joints are off, or whenever the true arm silhouette bulges past a
+    // straight line (loose sleeve, bent wrist). Tracing the actual boundary
+    // like an occluder polygon removes that dependency on joint accuracy.
+    visibleArms: {
+      type: 'array', items: {
+        type: 'object', additionalProperties: false,
+        properties: { side: { type: 'string', enum: ['left', 'right'] }, polygon: { type: 'array', items: POINT_SCHEMA } },
+        required: ['side', 'polygon'],
+      },
+    },
   },
-  required: ['found', 'confidence', 'summary', 'head', 'torso', 'leftShoulder', 'rightShoulder', 'leftElbow', 'rightElbow', 'leftWrist', 'rightWrist', 'occluders'],
+  required: ['found', 'confidence', 'summary', 'head', 'torso', 'leftShoulder', 'rightShoulder', 'leftElbow', 'rightElbow', 'leftWrist', 'rightWrist', 'occluders', 'visibleArms'],
 };
 
 function normalizePose(value) {
@@ -200,6 +214,10 @@ function normalizePose(value) {
       description: String(item?.description || ''),
       polygon: Array.isArray(item?.polygon) ? item.polygon.map(point) : [],
     })).filter((item) => item.polygon.length >= 3) : [],
+    visibleArms: Array.isArray(value.visibleArms) ? value.visibleArms.map((item) => ({
+      side: item?.side === 'left' || item?.side === 'right' ? item.side : null,
+      polygon: Array.isArray(item?.polygon) ? item.polygon.map(point) : [],
+    })).filter((item) => item.side && item.polygon.length >= 3) : [],
   };
   for (const name of ['head', 'torso', 'leftShoulder', 'rightShoulder', 'leftElbow', 'rightElbow', 'leftWrist', 'rightWrist']) normalized[name] = point(value[name]);
   return normalized;
@@ -249,7 +267,7 @@ async function providerFetch(url, options, label) {
 
 export async function analyzePoseWithProvider({ provider, key, image, signal }) {
   if (!key) throw new Error(`${provider === 'openai' ? 'OpenAI' : 'Gemini'}のAPIキーを設定してください`);
-  const instruction = `Analyze the main reclining or lying person whose arms should be changed to a fully extended overhead banzai pose. Return coordinates normalized from 0 to 1000 relative to the full image. Estimate hidden joints. left/right mean the person's anatomical sides. Identify only foreground people or objects covering this subject or either arm path as occluders, tracing each visible boundary with a tight polygon of 6 to 20 points. Never classify the subject's own body or clothes as an occluder. If no suitable person exists, set found=false. confidence must be 0 to 1.`;
+  const instruction = `Analyze the main reclining or lying person whose arms should be changed to a fully extended overhead banzai pose. Return coordinates normalized from 0 to 1000 relative to the full image. Estimate hidden joints. left/right mean the person's anatomical sides. Identify only foreground people or objects covering this subject or either arm path as occluders, tracing each visible boundary with a tight polygon of 6 to 20 points. Never classify the subject's own body or clothes as an occluder. Separately, for each of the subject's own two arms that is at least partially visible in the CURRENT, pre-edit photo, trace its actual visible outline (shoulder through upper arm, forearm, wrist and hand/fingers, following the true silhouette rather than a straight line through the joints) as a tight polygon of 6 to 20 points in visibleArms, with side set to the matching "left" or "right" anatomical side; omit a side entirely if that arm is fully hidden behind an occluder or outside the frame. If no suitable person exists, set found=false. confidence must be 0 to 1.`;
   // Analysis does not need edit-resolution pixels. A smaller JPEG avoids large
   // base64 request bodies that frequently fail in iOS/Safari.
   const imageDataUrl = analysisImageDataUrl(image);
@@ -363,6 +381,29 @@ function fromNormalized(point, image) {
   return { x: point.x * image.width / 1000, y: point.y * image.height / 1000 };
 }
 
+// Paints one side's armsOldRegion contribution. Prefers the AI-traced visible
+// outline (accurate to the actual photo, whatever the joint estimates say);
+// falls back to the old decreed shoulder-elbow-wrist stroke + wrist circle
+// only when no usable polygon came back (e.g. that arm was fully occluded).
+// ctx must already have fillStyle/strokeStyle/lineWidth/lineCap/lineJoin set
+// by the caller.
+export function paintOldArmRegion(ctx, { polygon, shoulder, elbow, wrist, oldWristRadius }) {
+  if (polygon && polygon.length >= 3) {
+    ctx.beginPath();
+    ctx.moveTo(polygon[0].x, polygon[0].y);
+    for (const point of polygon.slice(1)) ctx.lineTo(point.x, point.y);
+    ctx.closePath();
+    ctx.fill();
+    // Stroking the same path adds a small buffer for the AI polygon's own
+    // boundary imprecision, same role the wrist circle plays for the
+    // geometric fallback below.
+    ctx.stroke();
+    return;
+  }
+  ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(elbow.x, elbow.y); ctx.lineTo(wrist.x, wrist.y); ctx.stroke();
+  ctx.beginPath(); ctx.arc(wrist.x, wrist.y, oldWristRadius, 0, Math.PI * 2); ctx.fill();
+}
+
 export function createAutomaticPlan(image, analysis) {
   if (!analysis?.found) throw new Error('横たわっている対象人物を自動検出できませんでした');
   const landmarks = {};
@@ -415,14 +456,26 @@ export function createAutomaticPlan(image, analysis) {
   // against real photo coordinates showing this circle's radius landing
   // within the same range as the gap to a front subject's foot). Half that.
   const oldWristRadius = oldRegionWidth * 0.5;
+  // AI-traced visible outline per side, in image pixel coordinates. Preferred
+  // over the decreed shoulder-elbow-wrist geometry below for armsOldRegion:
+  // it follows the arm's actual silhouette in this photo instead of a
+  // straight line through 3 estimated joints, so it doesn't need re-tuning
+  // per image the way the old fixed radii/widths did. Returned in the plan
+  // so manual corrections (e.g. addTargetCorridors) can reuse the same
+  // contour instead of falling back to the geometric shape.
+  const visibleArmPolygons = { left: null, right: null };
+  for (const item of analysis.visibleArms || []) {
+    if (item.side !== 'left' && item.side !== 'right') continue;
+    const polygon = item.polygon.map((point) => fromNormalized(point, image));
+    if (polygon.length >= 3) visibleArmPolygons[item.side] = polygon;
+  }
   for (const side of ['left', 'right']) {
     const shoulder = landmarks[`${side}Shoulder`];
     const elbow = joints[`${side}Elbow`];
     const wrist = joints[`${side}Wrist`];
     armCtx.beginPath(); armCtx.moveTo(shoulder.x, shoulder.y); armCtx.lineTo(elbow.x, elbow.y); armCtx.lineTo(wrist.x, wrist.y); armCtx.stroke();
     armCtx.beginPath(); armCtx.arc(wrist.x, wrist.y, handRadius, 0, Math.PI * 2); armCtx.fill();
-    oldCtx.beginPath(); oldCtx.moveTo(shoulder.x, shoulder.y); oldCtx.lineTo(elbow.x, elbow.y); oldCtx.lineTo(wrist.x, wrist.y); oldCtx.stroke();
-    oldCtx.beginPath(); oldCtx.arc(wrist.x, wrist.y, oldWristRadius, 0, Math.PI * 2); oldCtx.fill();
+    paintOldArmRegion(oldCtx, { polygon: visibleArmPolygons[side], shoulder, elbow, wrist, oldWristRadius });
     armCtx.beginPath(); armCtx.moveTo(shoulder.x, shoulder.y); armCtx.lineTo(targets[`${side}Hand`].x, targets[`${side}Hand`].y); armCtx.stroke();
     // The reach corridor's stroke only gives the target endpoint a round cap
     // as wide as the forearm; a hand needs more room than that, exactly like
@@ -455,7 +508,7 @@ export function createAutomaticPlan(image, analysis) {
     // hair, clothing edges and shadows are not left behind as fragments.
     occCtx.closePath(); occCtx.fill(); occCtx.stroke();
   }
-  return { landmarks, targets, joints, arms, armsOldRegion, occluder, confidence: analysis.confidence, summary: analysis.summary };
+  return { landmarks, targets, joints, arms, armsOldRegion, visibleArmPolygons, occluder, confidence: analysis.confidence, summary: analysis.summary };
 }
 
 async function responseError(response) {
