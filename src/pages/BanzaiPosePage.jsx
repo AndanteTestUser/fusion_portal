@@ -70,6 +70,7 @@ export default function BanzaiPosePage() {
   const pendingRef = useRef(null);
   const occluderRef = useRef(null);
   const armsRef = useRef(null);
+  const armsOldRegionRef = useRef(null);
   const canvasRef = useRef(null);
   const pointerRef = useRef(null);
   const abortRef = useRef(null);
@@ -150,7 +151,10 @@ export default function BanzaiPosePage() {
         // Don't clobber a mask the user has already started correcting by
         // hand while the analysis was still running.
         if (!manualTouchedRef.current.occluder) occluderRef.current = merge(occluderRef.current, plan.occluder);
-        if (!manualTouchedRef.current.arms) armsRef.current = merge(armsRef.current, plan.arms);
+        if (!manualTouchedRef.current.arms) {
+          armsRef.current = merge(armsRef.current, plan.arms);
+          armsOldRegionRef.current = merge(armsOldRegionRef.current, plan.armsOldRegion);
+        }
         if (advancedReturnRef.current?.stage === 'analyzing') {
           advancedReturnRef.current = {
             image: copyCanvas(image),
@@ -163,7 +167,7 @@ export default function BanzaiPosePage() {
         return;
       }
       setLandmarks(plan.landmarks); setHandOverrides(plan.targets);
-      occluderRef.current = plan.occluder; armsRef.current = plan.arms;
+      occluderRef.current = plan.occluder; armsRef.current = plan.arms; armsOldRegionRef.current = plan.armsOldRegion;
       let base = copyCanvas(image);
 
       if (maskHasPaint(plan.occluder)) {
@@ -183,7 +187,7 @@ export default function BanzaiPosePage() {
       });
       let result = composeSelected(base, generated, plan.arms);
       if (selectedChangeRatio(base, result, plan.arms) < 0.005) throw new Error('両腕の変化を確認できませんでした');
-      result = restoreOccluder(result, image, plan.occluder, plan.arms);
+      result = restoreOccluder(result, image, plan.occluder, plan.armsOldRegion);
       workingRef.current = result;
       pendingRef.current = null;
       setStage('done'); setMessage('自動処理が完了しました。前面の遮蔽物は原画像から同じ位置へ復元済みです。');
@@ -201,6 +205,7 @@ export default function BanzaiPosePage() {
     workingRef.current = copyCanvas(image);
     occluderRef.current = makeCanvas(image.width, image.height);
     armsRef.current = makeCanvas(image.width, image.height);
+    armsOldRegionRef.current = makeCanvas(image.width, image.height);
     pendingRef.current = null;
     autoPlanRef.current = null;
     advancedDraftRef.current = null;
@@ -277,24 +282,33 @@ export default function BanzaiPosePage() {
     if (!targets) return setMessage('頭・胴体・両肩の4点を指定してください。');
     const mask = armsRef.current;
     const ctx = mask.getContext('2d');
+    const oldCtx = armsOldRegionRef.current.getContext('2d');
     const shoulderWidth = Math.hypot(landmarks.leftShoulder.x - landmarks.rightShoulder.x, landmarks.leftShoulder.y - landmarks.rightShoulder.y);
     const width = Math.max(18, shoulderWidth * 0.38);
-    ctx.save();
-    ctx.strokeStyle = 'rgba(255, 60, 80, 1)';
-    ctx.fillStyle = 'rgba(255, 60, 80, 1)';
-    ctx.lineWidth = width;
-    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    for (const c of [ctx, oldCtx]) {
+      c.save();
+      c.strokeStyle = 'rgba(255, 60, 80, 1)';
+      c.fillStyle = 'rgba(255, 60, 80, 1)';
+      c.lineWidth = width;
+      c.lineCap = 'round'; c.lineJoin = 'round';
+    }
     const joints = autoPlanRef.current?.joints;
     for (const [side, hand] of [['left', targets.leftHand], ['right', targets.rightHand]]) {
       const shoulder = landmarks[`${side}Shoulder`];
       // Also cover the original elbow/wrist path (and a buffer around the
       // original hand) so the automatic update doesn't leave the previous
-      // arm's pixels outside the mask as residual ghost fragments.
+      // arm's pixels outside the mask as residual ghost fragments. This part
+      // alone is mirrored onto armsOldRegionRef: occluder restoration must
+      // only ever be excluded near this original path, never near the new
+      // target below, which can land anywhere the pose direction points on
+      // screen with no relation to what is actually there.
       const elbow = joints?.[`${side}Elbow`];
       const wrist = joints?.[`${side}Wrist`];
       if (elbow && wrist) {
-        ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(elbow.x, elbow.y); ctx.lineTo(wrist.x, wrist.y); ctx.stroke();
-        ctx.beginPath(); ctx.arc(wrist.x, wrist.y, width * 1.1, 0, Math.PI * 2); ctx.fill();
+        for (const c of [ctx, oldCtx]) {
+          c.beginPath(); c.moveTo(shoulder.x, shoulder.y); c.lineTo(elbow.x, elbow.y); c.lineTo(wrist.x, wrist.y); c.stroke();
+          c.beginPath(); c.arc(wrist.x, wrist.y, width * 1.1, 0, Math.PI * 2); c.fill();
+        }
       }
       ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(hand.x, hand.y); ctx.stroke();
       // The corridor's round cap at the target is only as wide as the
@@ -303,6 +317,7 @@ export default function BanzaiPosePage() {
       ctx.beginPath(); ctx.arc(hand.x, hand.y, width * 1.1, 0, Math.PI * 2); ctx.fill();
     }
     ctx.restore();
+    oldCtx.restore();
     setMessage('肩から目標方向までの編集範囲を自動設定しました。通常はこのまま生成できます。');
     setVersion((v) => v + 1);
   };
@@ -370,7 +385,7 @@ export default function BanzaiPosePage() {
     if (stage === 'occluder') {
       workingRef.current = pendingRef.current; pendingRef.current = null; moveToArms();
     } else {
-      workingRef.current = restoreOccluder(pendingRef.current, originalRef.current, occluderRef.current, armsRef.current);
+      workingRef.current = restoreOccluder(pendingRef.current, originalRef.current, occluderRef.current, armsOldRegionRef.current);
       pendingRef.current = null; setPreview(false); setStage('done');
       setMessage('前面の遮蔽物を元座標に復元しました。仕上がりを確認して保存してください。');
       setVersion((v) => v + 1);
@@ -392,6 +407,7 @@ export default function BanzaiPosePage() {
       workingRef.current = copyCanvas(draft.image);
       occluderRef.current = copyCanvas(draft.occluder);
       armsRef.current = copyCanvas(draft.arms);
+      armsOldRegionRef.current = copyCanvas(draft.armsOldRegion);
       pendingRef.current = draft.pending ? copyCanvas(draft.pending) : null;
       setLandmarks(draft.landmarks);
       setHandOverrides(draft.handOverrides);
@@ -403,6 +419,7 @@ export default function BanzaiPosePage() {
       workingRef.current = copyCanvas(image);
       occluderRef.current = plan ? copyCanvas(plan.occluder) : makeCanvas(image.width, image.height);
       armsRef.current = plan ? copyCanvas(plan.arms) : makeCanvas(image.width, image.height);
+      armsOldRegionRef.current = plan ? copyCanvas(plan.armsOldRegion) : makeCanvas(image.width, image.height);
       pendingRef.current = null;
       setLandmarks(plan?.landmarks || {});
       setHandOverrides(plan?.targets || {});
@@ -431,6 +448,7 @@ export default function BanzaiPosePage() {
         image: copyCanvas(workingRef.current),
         occluder: copyCanvas(occluderRef.current),
         arms: copyCanvas(armsRef.current),
+        armsOldRegion: copyCanvas(armsOldRegionRef.current),
         pending: pendingRef.current ? copyCanvas(pendingRef.current) : null,
         landmarks: { ...landmarks },
         handOverrides: { ...handOverrides },

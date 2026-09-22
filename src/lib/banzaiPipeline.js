@@ -79,85 +79,34 @@ export function selectedChangeRatio(before, after, selection) {
   return selected ? changed / selected : 0;
 }
 
-// Pure pixel-array flood fill (no canvas) so this can be unit tested. Splits
-// maskData into 4-connected components. A component whose area mostly
-// coincides with refData (the arms corridor) is a small object gripped by
-// the hand itself, reaching down to that grip point as one shape: dropped
-// entirely, since carving only the overlap left the rest of it (beyond the
-// narrow corridor/hand circle) pasted back at its old position after the arm
-// moved elsewhere, appearing as a piece floating with nothing holding it. A
-// component that only grazes refData at an edge is a large, mostly
-// independent occluder (e.g. another foreground subject) that happens to
-// touch the corridor; dropping all of it purely for touching would delete an
-// unrelated object, so only its literal overlapping pixels are carved,
-// exactly as before.
-export function excludeConnectedOverlap(width, height, maskData, refData, threshold = 16, dropRatio = 0.3) {
-  const size = width * height;
-  const labels = new Int32Array(size).fill(-1);
-  const totalCounts = [];
-  const overlapCounts = [];
-  const stack = [];
-  for (let start = 0; start < size; start++) {
-    if (labels[start] !== -1 || maskData[start * 4 + 3] < threshold) continue;
-    const label = totalCounts.length;
-    totalCounts.push(0);
-    overlapCounts.push(0);
-    labels[start] = label;
-    stack.push(start);
-    while (stack.length) {
-      const idx = stack.pop();
-      totalCounts[label]++;
-      if (refData[idx * 4 + 3] >= threshold) overlapCounts[label]++;
-      const x = idx % width;
-      const y = (idx / width) | 0;
-      const neighbors = [];
-      if (x > 0) neighbors.push(idx - 1);
-      if (x < width - 1) neighbors.push(idx + 1);
-      if (y > 0) neighbors.push(idx - width);
-      if (y < height - 1) neighbors.push(idx + width);
-      for (const next of neighbors) {
-        if (labels[next] !== -1 || maskData[next * 4 + 3] < threshold) continue;
-        labels[next] = label;
-        stack.push(next);
-      }
-    }
-  }
-  const dropWhole = totalCounts.map((total, label) => overlapCounts[label] / total > dropRatio);
-  const result = new Uint8ClampedArray(maskData.length);
-  for (let i = 0; i < size; i++) {
-    const label = labels[i];
-    if (label === -1 || dropWhole[label]) continue;
-    // Even in a kept (mostly independent) component, never restore the exact
-    // pixels the arm edit occupies, or that graze would overwrite it.
-    if (refData[i * 4 + 3] >= threshold) continue;
-    const base = i * 4;
-    result[base] = maskData[base];
-    result[base + 1] = maskData[base + 1];
-    result[base + 2] = maskData[base + 2];
-    result[base + 3] = maskData[base + 3];
-  }
+export function subtractMask(base, subtract) {
+  const result = copyCanvas(base);
+  const ctx = result.getContext('2d');
+  ctx.globalCompositeOperation = 'destination-out';
+  ctx.drawImage(subtract, 0, 0);
   return result;
-}
-
-function excludeArmOverlappingOccluders(occluderMask, armsMask) {
-  const { width, height } = occluderMask;
-  const maskData = occluderMask.getContext('2d').getImageData(0, 0, width, height).data;
-  const refData = armsMask.getContext('2d').getImageData(0, 0, width, height).data;
-  const filtered = excludeConnectedOverlap(width, height, maskData, refData);
-  const canvas = makeCanvas(width, height);
-  canvas.getContext('2d').putImageData(new ImageData(filtered, width, height), 0, 0);
-  return canvas;
 }
 
 export function restoreOccluder(edited, original, occluderMask, protectedMask) {
   // Pixel-for-pixel restoration of the front layer in its original
-  // coordinates, except wherever it reaches into protectedMask (typically
-  // the finalized arms mask/corridor). A small occluder shape mostly inside
-  // that corridor is dropped whole rather than restored, since it was
-  // reaching to a hand that has since moved for the new pose; a large,
-  // mostly independent shape that only grazes the corridor keeps the rest of
-  // itself and loses just the grazed pixels.
-  const mask = protectedMask ? excludeArmOverlappingOccluders(occluderMask, protectedMask) : occluderMask;
+  // coordinates, except wherever protectedMask overlaps it.
+  //
+  // protectedMask must be only the ORIGINAL arm's own path (shoulder to the
+  // pre-edit elbow/wrist), never the new banzai target's reach corridor. The
+  // occluder polygon is deliberately expanded to fully cover a foreground
+  // subject, including where their hand grips the original arm, so it
+  // routinely overlaps that original path; restoring there would paste back
+  // the pre-edit bent arm right where the new one now is. But the new
+  // target's corridor points wherever the pose direction happens to aim
+  // (often straight through the same foreground subject's torso on its way
+  // past their head) with no physical relationship to the occluder at all;
+  // excluding overlap with it would delete or fragment a real, unrelated
+  // occluder instead of the finalized arm ever being at risk there. Wherever
+  // a foreground subject's original position truly does cover the new arm on
+  // screen, restoring them in full is the physically correct result (they
+  // were in front; the new arm passes behind them), not a bug to guard
+  // against.
+  const mask = protectedMask ? subtractMask(occluderMask, protectedMask) : occluderMask;
   return composeSelected(edited, original, mask);
 }
 
@@ -374,11 +323,24 @@ export function createAutomaticPlan(image, analysis) {
   // slightly off; a generous circle at the original wrist ensures stray
   // fingers are not left outside the mask as residual ghost fragments.
   const handRadius = armWidth * 1.1;
+  // Tracks only the pre-edit shoulder-elbow-wrist path, kept apart from the
+  // new target's reach corridor above. Occluder restoration must only ever
+  // be excluded near this original path (where a real pixel conflict with
+  // the old bent arm can occur), never near the new target, which can land
+  // anywhere the pose direction happens to point on screen with no relation
+  // to what is actually there.
+  const armsOldRegion = makeCanvas(image.width, image.height);
+  const oldCtx = armsOldRegion.getContext('2d');
+  oldCtx.strokeStyle = 'rgba(255,60,80,1)'; oldCtx.fillStyle = 'rgba(255,60,80,1)';
+  oldCtx.lineWidth = armWidth;
+  oldCtx.lineCap = 'round'; oldCtx.lineJoin = 'round';
   for (const side of ['left', 'right']) {
     const shoulder = landmarks[`${side}Shoulder`];
     const wrist = joints[`${side}Wrist`];
     armCtx.beginPath(); armCtx.moveTo(shoulder.x, shoulder.y); armCtx.lineTo(joints[`${side}Elbow`].x, joints[`${side}Elbow`].y); armCtx.lineTo(wrist.x, wrist.y); armCtx.stroke();
     armCtx.beginPath(); armCtx.arc(wrist.x, wrist.y, handRadius, 0, Math.PI * 2); armCtx.fill();
+    oldCtx.beginPath(); oldCtx.moveTo(shoulder.x, shoulder.y); oldCtx.lineTo(joints[`${side}Elbow`].x, joints[`${side}Elbow`].y); oldCtx.lineTo(wrist.x, wrist.y); oldCtx.stroke();
+    oldCtx.beginPath(); oldCtx.arc(wrist.x, wrist.y, handRadius, 0, Math.PI * 2); oldCtx.fill();
     armCtx.beginPath(); armCtx.moveTo(shoulder.x, shoulder.y); armCtx.lineTo(targets[`${side}Hand`].x, targets[`${side}Hand`].y); armCtx.stroke();
     // The reach corridor's stroke only gives the target endpoint a round cap
     // as wide as the forearm; a hand needs more room than that, exactly like
@@ -407,7 +369,7 @@ export function createAutomaticPlan(image, analysis) {
     // hair, clothing edges and shadows are not left behind as fragments.
     occCtx.closePath(); occCtx.fill(); occCtx.stroke();
   }
-  return { landmarks, targets, joints, arms, occluder, confidence: analysis.confidence, summary: analysis.summary };
+  return { landmarks, targets, joints, arms, armsOldRegion, occluder, confidence: analysis.confidence, summary: analysis.summary };
 }
 
 async function responseError(response) {
