@@ -127,15 +127,25 @@ export function estimateBanzaiTargets({ head, leftShoulder, rightShoulder, torso
   };
 }
 
-export function makePoseGuide(image, landmarks, targets) {
+// `elbows` is optional and per-side ({ leftElbow, rightElbow }). A side with
+// no entry draws exactly the single straight shoulder-to-hand line this
+// function always drew before elbow bending existed; a side with one draws a
+// two-segment line through that bend point instead, with its own marker
+// circle so the image AI can see where to bend.
+export function makePoseGuide(image, landmarks, targets, elbows) {
   const guide = copyCanvas(image);
   const ctx = guide.getContext('2d');
   const width = Math.max(12, image.width / 90);
   ctx.strokeStyle = '#00ff33'; ctx.fillStyle = '#00ff33';
-  ctx.lineWidth = width; ctx.lineCap = 'round';
+  ctx.lineWidth = width; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
   for (const [side, hand] of [['left', targets.leftHand], ['right', targets.rightHand]]) {
     const shoulder = landmarks[`${side}Shoulder`];
-    ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(hand.x, hand.y); ctx.stroke();
+    const bend = elbows?.[`${side}Elbow`];
+    ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y);
+    if (bend) ctx.lineTo(bend.x, bend.y);
+    ctx.lineTo(hand.x, hand.y);
+    ctx.stroke();
+    if (bend) { ctx.beginPath(); ctx.arc(bend.x, bend.y, width * 0.9, 0, Math.PI * 2); ctx.fill(); }
     ctx.beginPath(); ctx.arc(hand.x, hand.y, width * 1.2, 0, Math.PI * 2); ctx.fill();
   }
   return guide;

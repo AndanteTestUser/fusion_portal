@@ -8,7 +8,11 @@ import {
 } from '../lib/banzaiPipeline.js';
 
 const LANDMARKS = ['head', 'torso', 'leftShoulder', 'rightShoulder'];
-const LABELS = { head: '頭の中心', torso: '胴体の中心', leftShoulder: '左肩', rightShoulder: '右肩', leftHand: '左手の目標', rightHand: '右手の目標' };
+const LABELS = {
+  head: '頭の中心', torso: '胴体の中心', leftShoulder: '左肩', rightShoulder: '右肩',
+  leftHand: '左手の目標', rightHand: '右手の目標',
+  leftElbow: '左肘を曲げる位置', rightElbow: '右肘を曲げる位置',
+};
 const MAX_SIDE = 2048;
 
 function download(canvas, name) {
@@ -65,6 +69,14 @@ export default function BanzaiPosePage() {
   const [pointMode, setPointMode] = useState(null);
   const [landmarks, setLandmarks] = useState({});
   const [handOverrides, setHandOverrides] = useState({});
+  // Optional per-side elbow bend point for the manual "腕の方向" stage only.
+  // Unset (the default) means exactly today's behavior: makePoseGuide and
+  // addTargetCorridors draw a single straight shoulder-to-hand line/corridor
+  // for that side, byte-for-byte the same as before this existed. Setting
+  // one bends that side's guide line and corridor through the marked point
+  // instead. The fully automatic pipeline (runAutomatic) never reads this
+  // state, so it stays unaffected regardless of what's set here.
+  const [elbowTargets, setElbowTargets] = useState({});
   const [finishing, setFinishing] = useState(false);
   // General-purpose touch-up: unlike the finishing eraser above (which only
   // re-draws the boundary between two already-rendered layers), this sends
@@ -154,7 +166,12 @@ export default function BanzaiPosePage() {
       ctx.lineWidth = Math.max(3, image.width / 400);
       for (const [side, hand] of [['left', targets.leftHand], ['right', targets.rightHand]]) {
         const shoulder = landmarks[`${side}Shoulder`];
-        ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(hand.x, hand.y); ctx.stroke();
+        const bend = elbowTargets[`${side}Elbow`];
+        ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y);
+        if (bend) ctx.lineTo(bend.x, bend.y);
+        ctx.lineTo(hand.x, hand.y);
+        ctx.stroke();
+        if (bend) { ctx.beginPath(); ctx.arc(bend.x, bend.y, Math.max(4, image.width / 260), 0, 2 * Math.PI); ctx.fill(); }
         ctx.beginPath(); ctx.arc(hand.x, hand.y, Math.max(5, image.width / 200), 0, 2 * Math.PI); ctx.fill();
       }
       ctx.restore();
@@ -167,7 +184,7 @@ export default function BanzaiPosePage() {
         ctx.fillText(LABELS[name], point.x + 9, point.y - 9);
       }
     }
-  }, [version, stage, preview, advanced, finishing, retouching, hasRetouchPreview, activeImage, activeMask, landmarks, targets?.leftHand.x, targets?.leftHand.y, targets?.rightHand.x, targets?.rightHand.y]);
+  }, [version, stage, preview, advanced, finishing, retouching, hasRetouchPreview, activeImage, activeMask, landmarks, elbowTargets, targets?.leftHand.x, targets?.leftHand.y, targets?.rightHand.x, targets?.rightHand.y]);
 
   async function runAutomatic(image) {
     const key = entries[provider]?.apiKey;
@@ -280,7 +297,7 @@ export default function BanzaiPosePage() {
     finishMaskRef.current = null;
     retouchMaskRef.current = null;
     retouchPreviewRef.current = null;
-    setLandmarks({}); setHandOverrides({}); setPreview(false); setAdvanced(false); setFinishing(false);
+    setLandmarks({}); setHandOverrides({}); setElbowTargets({}); setPreview(false); setAdvanced(false); setFinishing(false);
     setRetouching(false); setHasRetouchPreview(false); setRetouchPrompt('');
     setVersion((v) => v + 1);
     runAutomatic(image);
@@ -369,6 +386,7 @@ export default function BanzaiPosePage() {
     if (pointMode) {
       manualTouchedRef.current.points = true;
       if (pointMode.endsWith('Hand')) setHandOverrides((current) => ({ ...current, [pointMode]: at }));
+      else if (pointMode.endsWith('Elbow')) setElbowTargets((current) => ({ ...current, [pointMode]: at }));
       else setLandmarks((current) => ({ ...current, [pointMode]: at }));
       setPointMode(null);
     } else { pointerRef.current = at; stroke(at, at); }
@@ -401,7 +419,16 @@ export default function BanzaiPosePage() {
         ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(elbow.x, elbow.y); ctx.lineTo(wrist.x, wrist.y); ctx.stroke();
         ctx.beginPath(); ctx.arc(wrist.x, wrist.y, width * 1.1, 0, Math.PI * 2); ctx.fill();
       }
-      ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(hand.x, hand.y); ctx.stroke();
+      // An optional user-marked bend point for the NEW pose (as opposed to
+      // `elbow` above, which is the OLD pose's AI-estimated elbow used only
+      // to cover the arm being replaced). Unset, this is exactly the prior
+      // single straight shoulder-to-hand corridor.
+      const bend = elbowTargets[`${side}Elbow`];
+      ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y);
+      if (bend) ctx.lineTo(bend.x, bend.y);
+      ctx.lineTo(hand.x, hand.y);
+      ctx.stroke();
+      if (bend) { ctx.beginPath(); ctx.arc(bend.x, bend.y, width * 1.1, 0, Math.PI * 2); ctx.fill(); }
       // The corridor's round cap at the target is only as wide as the
       // forearm; give the new hand the same buffer as the original wrist
       // above, or it gets clipped off by the mask boundary during composite.
@@ -459,8 +486,8 @@ export default function BanzaiPosePage() {
     try {
       const prompt = stage === 'occluder'
         ? 'Remove only the foreground occluding person or object inside the transparent mask. Complete the hidden surface and the background in the same camera angle, style and lighting. This is a temporary edit base; preserve the lying subject, their pose, all unmasked pixels, furniture and canvas framing.'
-        : `Edit only the lying subject's two arms into a fully extended, anatomically natural overhead banzai pose in the direction of their head. The second input image is a pose guide with green lines from each shoulder toward a virtual target. Use those lines for the arm paths, but do not render the green lines. Where the target lands inside the frame, draw a complete, clearly visible hand there — an open hand or a loose fist, with individual fingers or knuckle shapes like a real hand, not a blurred stub, a tapering sleeve, or the arm simply fading into empty space; draw the hand even where nothing is behind it to anchor it against. A target may be outside the crop: in that case, continue the arm naturally through the image edge and keep the hand out of frame instead of bending or shortening the arm. The head is at (${Math.round(landmarks.head.x)},${Math.round(landmarks.head.y)}), torso at (${Math.round(landmarks.torso.x)},${Math.round(landmarks.torso.y)}). Match shoulder joints and perspective, not equal lengths in image pixels. Remove traces of the old arm pose inside the mask, including any disconnected hand or finger fragments left outside the new pose. Respect gravity: wherever a continuous supporting surface (mat, floor, bed, cushion) is actually visible directly beneath an arm's path, let that forearm and hand rest against it with a matching contact shadow and perspective instead of floating; where no such surface is visible under the path (it leaves frame, crosses open air, or the subject is not fully flat there), do not invent contact and let the arm continue naturally instead. Preserve the subject's face, torso, clothing, other people, scene, camera, framing and proportions.`;
-      const guide = stage === 'arms' ? makePoseGuide(workingRef.current, landmarks, targets) : null;
+        : `Edit only the lying subject's two arms into a fully extended, anatomically natural overhead banzai pose in the direction of their head. The second input image is a pose guide with green lines from each shoulder toward a virtual target. Use those lines for the arm paths, but do not render the green lines. Each line is straight unless it has a small green circle partway along it marking a bend point — where a bend is marked, bend that arm's elbow to pass exactly through the marked point instead of keeping it straight; where no bend is marked on a line, keep that arm fully extended and straight, exactly as before. Where the target lands inside the frame, draw a complete, clearly visible hand there — an open hand or a loose fist, with individual fingers or knuckle shapes like a real hand, not a blurred stub, a tapering sleeve, or the arm simply fading into empty space; draw the hand even where nothing is behind it to anchor it against. A target may be outside the crop: in that case, continue the arm naturally through the image edge and keep the hand out of frame instead of bending anywhere the guide doesn't mark or shortening the arm. The head is at (${Math.round(landmarks.head.x)},${Math.round(landmarks.head.y)}), torso at (${Math.round(landmarks.torso.x)},${Math.round(landmarks.torso.y)}). Match shoulder joints and perspective, not equal lengths in image pixels. Remove traces of the old arm pose inside the mask, including any disconnected hand or finger fragments left outside the new pose. Respect gravity independently for each segment of an arm's path (the whole arm if straight, or the upper-arm and forearm segments separately if bent at a marked point): wherever a continuous supporting surface (mat, floor, bed, cushion) is actually visible directly beneath a given segment, let that segment and, for the segment ending at the hand, the hand itself rest against it with a matching contact shadow and perspective instead of floating; where no such surface is visible beneath a given segment (it leaves frame, crosses open air, or the subject is not fully flat there), do not invent contact for that segment and let the arm continue naturally instead. Preserve the subject's face, torso, clothing, other people, scene, camera, framing and proportions.`;
+      const guide = stage === 'arms' ? makePoseGuide(workingRef.current, landmarks, targets, elbowTargets) : null;
       const generated = await editWithProvider({ provider, key, image: workingRef.current, selection: selected, guide, prompt, signal: controller.signal });
       pendingRef.current = composeSelected(workingRef.current, generated, selected);
       if (selectedChangeRatio(workingRef.current, pendingRef.current, selected) < 0.005) {
@@ -618,6 +645,7 @@ export default function BanzaiPosePage() {
       pendingRef.current = draft.pending ? copyCanvas(draft.pending) : null;
       setLandmarks(draft.landmarks);
       setHandOverrides(draft.handOverrides);
+      setElbowTargets(draft.elbowTargets || {});
       setStage(draft.stage);
       setPreview(Boolean(draft.pending));
       setMessage('前回の詳細調整を復元しました。続きから作業できます。');
@@ -630,6 +658,7 @@ export default function BanzaiPosePage() {
       pendingRef.current = null;
       setLandmarks(plan?.landmarks || {});
       setHandOverrides(plan?.targets || {});
+      setElbowTargets({});
       setStage('occluder');
       setPreview(false);
       setMessage(busy
@@ -661,6 +690,7 @@ export default function BanzaiPosePage() {
         pending: pendingRef.current ? copyCanvas(pendingRef.current) : null,
         landmarks: { ...landmarks },
         handOverrides: { ...handOverrides },
+        elbowTargets: { ...elbowTargets },
         stage,
       };
     }
@@ -743,6 +773,13 @@ export default function BanzaiPosePage() {
               className={`rounded px-3 py-2 ${pointMode === name ? 'bg-amber-600' : 'bg-slate-600'}`}
               onClick={() => setPointMode(name)}>{LABELS[name]}を直す{handOverrides[name] ? ' ✓' : ''}</button>)}
               {Object.keys(handOverrides).length > 0 && <button className="rounded bg-slate-600 px-3 py-2" onClick={() => setHandOverrides({})}>手先を自動位置に戻す</button>}</div>}
+            {targets && <div className="space-y-1">
+              <p className="text-xs text-slate-300">通常はまっすぐ伸ばします。曲げたい場合だけ、曲げたい位置を指定してください。</p>
+              <div className="flex flex-wrap gap-2">{['leftElbow', 'rightElbow'].map((name) => <button key={name}
+                className={`rounded px-3 py-2 ${pointMode === name ? 'bg-amber-600' : 'bg-slate-600'}`}
+                onClick={() => setPointMode(name)}>{LABELS[name]}{elbowTargets[name] ? ' ✓' : ''}</button>)}
+                {Object.keys(elbowTargets).length > 0 && <button className="rounded bg-slate-600 px-3 py-2" onClick={() => setElbowTargets({})}>肘の指定を解除（まっすぐに戻す）</button>}</div>
+            </div>}
             <div className="flex flex-wrap gap-2">
               <button className="rounded bg-emerald-700 px-3 py-2" onClick={addTargetCorridors}>腕の編集範囲を自動更新</button>
               <button className="rounded bg-slate-600 px-3 py-2" onClick={() => extendTargetOutside('left')}>左腕を画面外へ伸ばす</button>
