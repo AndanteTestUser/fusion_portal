@@ -33,17 +33,26 @@ export function buildGeminiCanvasPrompt({
         'AVOID: childlike proportions, chibi proportions, oversized eyes, round juvenile face, deformed anatomy, flat coloring.',
       ].join('\n')
     : [
-        `IMAGE CONTEXT (reference only): ${String(situation || '').trim()}`,
-        `REQUESTED STYLE / BODY: ${String(style || '').trim()}`,
-        `REQUESTED FACE / EXPRESSION / QUALITY: ${String(face || '').trim()}`,
-        `AVOID: ${String(negative || '').trim()}`,
-      ].join('\n');
+        ['IMAGE CONTEXT (reference only)', situation],
+        ['REQUESTED STYLE / BODY', style],
+        ['REQUESTED FACE / EXPRESSION / QUALITY', face],
+        ['AVOID', negative],
+      ]
+        .map(([label, value]) => [label, String(value || '').trim()])
+        .filter(([, value]) => value)
+        .map(([label, value]) => `${label}: ${value}`)
+        .join('\n');
 
   const optional = [];
   if (addLightEffects) optional.push('OPTIONAL CHANGE: Add subtle abstract glowing light effects without replacing or moving existing objects.');
   if (clarifyClothing) optional.push('OPTIONAL CHANGE: Use clearly adult, non-revealing sleeveless clothing while preserving garment colors and silhouette as closely as possible.');
 
   return [preserve, request, ...optional].filter(Boolean).join('\n\n');
+}
+
+export function sliderPositionFromClientX(clientX, left, width) {
+  if (!Number.isFinite(clientX) || !Number.isFinite(left) || !Number.isFinite(width) || width <= 0) return 50;
+  return Math.max(0, Math.min(100, ((clientX - left) / width) * 100));
 }
 
 export function getGeminiErrorMessage(status, payload) {
