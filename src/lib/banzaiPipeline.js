@@ -264,9 +264,10 @@ export function createAutomaticPlan(image, analysis) {
   for (const name of ['leftElbow', 'rightElbow', 'leftWrist', 'rightWrist']) joints[name] = fromNormalized(analysis[name], image);
   const estimated = estimateBanzaiTargets(landmarks);
   if (!estimated) throw new Error('人物の向きと肩幅を解析できませんでした');
-  const margin = Math.max(4, Math.min(image.width, image.height) * 0.015);
-  const fit = ({ x, y }) => ({ x: Math.max(margin, Math.min(image.width - margin, x)), y: Math.max(margin, Math.min(image.height - margin, y)) });
-  const targets = { leftHand: fit(estimated.leftHand), rightHand: fit(estimated.rightHand) };
+  // A correct overhead pose can naturally continue beyond the crop. Keep the
+  // virtual hand targets outside the canvas instead of shortening the arms to
+  // force both hands into frame.
+  const targets = estimated;
   const shoulderWidth = Math.hypot(landmarks.leftShoulder.x - landmarks.rightShoulder.x, landmarks.leftShoulder.y - landmarks.rightShoulder.y);
   const arms = makeCanvas(image.width, image.height);
   const armCtx = arms.getContext('2d');
@@ -281,12 +282,17 @@ export function createAutomaticPlan(image, analysis) {
   const occluder = makeCanvas(image.width, image.height);
   const occCtx = occluder.getContext('2d');
   occCtx.fillStyle = 'rgba(255,60,80,1)';
+  occCtx.strokeStyle = 'rgba(255,60,80,1)';
+  occCtx.lineWidth = Math.max(10, Math.min(image.width, image.height) * 0.035);
+  occCtx.lineJoin = 'round';
   for (const item of analysis.occluders || []) {
     const polygon = item.polygon.map((point) => fromNormalized(point, image));
     if (polygon.length < 3) continue;
     occCtx.beginPath(); occCtx.moveTo(polygon[0].x, polygon[0].y);
     for (const point of polygon.slice(1)) occCtx.lineTo(point.x, point.y);
-    occCtx.closePath(); occCtx.fill();
+    // The analysis polygon is intentionally expanded at its boundary so that
+    // hair, clothing edges and shadows are not left behind as fragments.
+    occCtx.closePath(); occCtx.fill(); occCtx.stroke();
   }
   return { landmarks, targets, arms, occluder, confidence: analysis.confidence, summary: analysis.summary };
 }
