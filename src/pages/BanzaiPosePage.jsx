@@ -194,12 +194,21 @@ export default function BanzaiPosePage() {
       // exactly the step that has repeatedly reintroduced or erased arm
       // pixels in this pipeline's history, so a check that only looks at the
       // arm-generation step's own output would miss damage done afterward.
+      // This is a vision-model judgment call, not a deterministic check, and
+      // it can also be genuinely correct: when the occluder's real content
+      // (e.g. another subject's face) sits where the new hand target lands
+      // on screen, restoring it there legitimately covers the new hand — a
+      // real composition conflict, not a rendering bug. Either way, never
+      // hide the actual result behind an error the user can't see; surface
+      // a warning and let them judge and revise instead of a dead end.
       setMessage('生成された両腕を確認しています…');
       const armCheck = await verifyArmsRendered({ provider, key, image: result, signal: controller.signal });
-      if (!armCheck.ok) throw new Error(`両腕が正しく生成されませんでした: ${armCheck.reason}`);
       workingRef.current = result;
       pendingRef.current = null;
-      setStage('done'); setMessage('自動処理が完了しました。前面の遮蔽物は原画像から同じ位置へ復元済みです。');
+      setStage('done');
+      setMessage(armCheck.ok
+        ? '自動処理が完了しました。前面の遮蔽物は原画像から同じ位置へ復元済みです。'
+        : `⚠️ 自動処理は完了しましたが、両腕の自動確認で問題の可能性が指摘されました（${armCheck.reason}）。前面の遮蔽物と新しい手の位置が重なっている可能性があります。下の画像で実際の仕上がりを確認してください。`);
       setVersion((v) => v + 1);
     } catch (error) {
       setStage('error');
@@ -412,15 +421,29 @@ export default function BanzaiPosePage() {
     abortRef.current = controller;
     setBusy(true);
     setMessage('復元後の仕上がりを確認しています…');
+    // verifyArmsRendered is a vision-model judgment call, not a deterministic
+    // check, and can be wrong in either direction. Blocking outright on a
+    // suspected failure hid the actual restored image behind an error the
+    // user couldn't correlate with anything on screen. Always show the real
+    // result; a failed check becomes a visible warning to judge for
+    // themselves (and revise if it's a real defect), not a dead end.
     try {
       const armCheck = await verifyArmsRendered({ provider, key, image: restored, signal: controller.signal });
-      if (!armCheck.ok) throw new Error(`遮蔽物の復元後に両腕を確認できませんでした: ${armCheck.reason}`);
       workingRef.current = restored;
       pendingRef.current = null; setPreview(false); setStage('done');
-      setMessage('前面の遮蔽物を元座標に復元しました。仕上がりを確認して保存してください。');
+      setMessage(armCheck.ok
+        ? '前面の遮蔽物を元座標に復元しました。仕上がりを確認して保存してください。'
+        : `⚠️ 両腕の自動確認で問題の可能性が指摘されました（${armCheck.reason}）。誤検出のこともあるので、下の画像で実際の仕上がりを確認してください。`);
       setVersion((v) => v + 1);
     } catch (error) {
-      setMessage(error.name === 'AbortError' ? '処理を中止しました。' : `復元後の確認に失敗しました: ${error.message} 範囲を見直して再実行してください。`);
+      if (error.name === 'AbortError') { setMessage('処理を中止しました。'); return; }
+      // A real failure to even run the check (network/API error) still shows
+      // the restored image rather than discarding it, for the same reason:
+      // the user should see what they're deciding about.
+      workingRef.current = restored;
+      pendingRef.current = null; setPreview(false); setStage('done');
+      setMessage(`⚠️ 復元後の自動確認に失敗しました（${error.message}）。下の画像で実際の仕上がりを確認してください。`);
+      setVersion((v) => v + 1);
     } finally {
       setBusy(false); abortRef.current = null;
     }
