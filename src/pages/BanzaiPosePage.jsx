@@ -74,11 +74,17 @@ export default function BanzaiPosePage() {
   const pointerRef = useRef(null);
   const abortRef = useRef(null);
   const advancedReturnRef = useRef(null);
+  const advancedDraftRef = useRef(null);
+  const advancedRef = useRef(false);
+  const autoPlanRef = useRef(null);
+  const manualTouchedRef = useRef({ occluder: false, arms: false, points: false });
 
   const estimated = estimateBanzaiTargets(landmarks);
   const targets = estimated ? { ...estimated, ...handOverrides } : null;
   const activeMask = stage === 'occluder' ? occluderRef.current : armsRef.current;
   const activeImage = preview ? pendingRef.current : workingRef.current;
+
+  useEffect(() => { advancedRef.current = advanced; }, [advanced]);
 
   useEffect(() => {
     const visible = canvasRef.current;
@@ -130,6 +136,30 @@ export default function BanzaiPosePage() {
     try {
       const analysis = await analyzePoseWithProvider({ provider, key, image, signal: controller.signal });
       const plan = createAutomaticPlan(image, analysis);
+      autoPlanRef.current = plan;
+      if (advancedRef.current) {
+        if (!manualTouchedRef.current.points) {
+          setLandmarks(plan.landmarks);
+          setHandOverrides(plan.targets);
+        }
+        const merge = (current, automatic) => {
+          const result = current || makeCanvas(image.width, image.height);
+          result.getContext('2d').drawImage(automatic, 0, 0);
+          return result;
+        };
+        occluderRef.current = merge(occluderRef.current, plan.occluder);
+        armsRef.current = merge(armsRef.current, plan.arms);
+        if (advancedReturnRef.current?.stage === 'analyzing') {
+          advancedReturnRef.current = {
+            image: copyCanvas(image),
+            stage: 'error',
+            message: '自動解析は完了し、詳細調整へ反映済みです。',
+          };
+        }
+        setMessage('自動解析が完了し、人物・遮蔽物・腕の編集候補を反映しました。必要な箇所だけ補正してください。');
+        setVersion((v) => v + 1);
+        return;
+      }
       setLandmarks(plan.landmarks); setHandOverrides(plan.targets);
       occluderRef.current = plan.occluder; armsRef.current = plan.arms;
       let base = copyCanvas(image);
@@ -170,6 +200,10 @@ export default function BanzaiPosePage() {
     occluderRef.current = makeCanvas(image.width, image.height);
     armsRef.current = makeCanvas(image.width, image.height);
     pendingRef.current = null;
+    autoPlanRef.current = null;
+    advancedDraftRef.current = null;
+    advancedReturnRef.current = null;
+    manualTouchedRef.current = { occluder: false, arms: false, points: false };
     setLandmarks({}); setHandOverrides({}); setPreview(false); setAdvanced(false);
     setVersion((v) => v + 1);
     runAutomatic(image);
@@ -215,6 +249,7 @@ export default function BanzaiPosePage() {
     ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.lineTo(to.x, to.y); ctx.stroke();
     ctx.beginPath(); ctx.arc(to.x, to.y, ctx.lineWidth / 2, 0, Math.PI * 2); ctx.fill();
     ctx.restore();
+    manualTouchedRef.current[stage === 'occluder' ? 'occluder' : 'arms'] = true;
     setVersion((v) => v + 1);
   };
 
@@ -223,6 +258,7 @@ export default function BanzaiPosePage() {
     event.currentTarget.setPointerCapture(event.pointerId);
     const at = position(event);
     if (pointMode) {
+      manualTouchedRef.current.points = true;
       if (pointMode.endsWith('Hand')) setHandOverrides((current) => ({ ...current, [pointMode]: at }));
       else setLandmarks((current) => ({ ...current, [pointMode]: at }));
       setPointMode(null);
@@ -248,13 +284,37 @@ export default function BanzaiPosePage() {
       ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(hand.x, hand.y); ctx.stroke();
     }
     ctx.restore();
-    setMessage('緑線の周囲を追加しました。元の腕が残りそうな箇所も塗り足してください。');
+    setMessage('肩から目標方向までの編集範囲を自動設定しました。通常はこのまま生成できます。');
     setVersion((v) => v + 1);
+  };
+
+  const extendTargetOutside = (side) => {
+    const shoulder = landmarks[`${side}Shoulder`];
+    const current = targets?.[`${side}Hand`];
+    const image = workingRef.current;
+    if (!shoulder || !current || !image) return;
+    let dx = current.x - shoulder.x;
+    let dy = current.y - shoulder.y;
+    const length = Math.hypot(dx, dy) || 1;
+    dx /= length; dy /= length;
+    const candidates = [];
+    if (dx > 0) candidates.push((image.width - shoulder.x) / dx);
+    if (dx < 0) candidates.push((0 - shoulder.x) / dx);
+    if (dy > 0) candidates.push((image.height - shoulder.y) / dy);
+    if (dy < 0) candidates.push((0 - shoulder.y) / dy);
+    const edgeDistance = Math.min(...candidates.filter((value) => value > 0));
+    const target = {
+      x: shoulder.x + dx * (edgeDistance + Math.max(image.width, image.height) * 0.18),
+      y: shoulder.y + dy * (edgeDistance + Math.max(image.width, image.height) * 0.18),
+    };
+    setHandOverrides((currentOverrides) => ({ ...currentOverrides, [`${side}Hand`]: target }));
+    manualTouchedRef.current.points = true;
+    setMessage(`${side === 'left' ? '左' : '右'}腕を画像端の外まで伸ばす設定にしました。手先は無理に画面内へ描画しません。`);
   };
 
   const moveToArms = () => {
     setStage('arms'); setPreview(false); setPointMode(null);
-    setMessage('頭・胴体・両肩を指定し、既存の両腕と目標の腕が通る範囲を塗ってください。');
+    setMessage('自動検出した肩と腕の方向を確認してください。必要な場合だけ位置や編集範囲を補正できます。');
     setVersion((v) => v + 1);
   };
 
@@ -262,9 +322,6 @@ export default function BanzaiPosePage() {
     const selected = stage === 'occluder' ? occluderRef.current : armsRef.current;
     if (!maskHasPaint(selected)) return setMessage('編集する範囲を塗ってください。');
     if (stage === 'arms' && !targets) return setMessage('頭・胴体・両肩の4点を指定してください。');
-    if (stage === 'arms' && Object.values(targets).some(({ x, y }) => x < 0 || y < 0 || x >= workingRef.current.width || y >= workingRef.current.height)) {
-      return setMessage('手先の目標が画像の外にあります。左右の手先を画像内へ修正してください。');
-    }
     const key = entries[provider]?.apiKey;
     const controller = new AbortController();
     abortRef.current = controller;
@@ -272,7 +329,7 @@ export default function BanzaiPosePage() {
     try {
       const prompt = stage === 'occluder'
         ? 'Remove only the foreground occluding person or object inside the transparent mask. Complete the hidden surface and the background in the same camera angle, style and lighting. This is a temporary edit base; preserve the lying subject, their pose, all unmasked pixels, furniture and canvas framing.'
-        : `Edit only the lying subject's two arms into a fully extended, anatomically natural overhead banzai pose in the direction of their head. The second input image is a pose guide with green lines from each shoulder to its target hand position. Use those lines for the arm paths, but do not render the green lines. The head is at (${Math.round(landmarks.head.x)},${Math.round(landmarks.head.y)}), torso at (${Math.round(landmarks.torso.x)},${Math.round(landmarks.torso.y)}). Match shoulder joints and perspective, not equal lengths in image pixels. Remove traces of the old arm pose inside the mask. Preserve the subject's face, torso, clothing, other people, scene, camera, framing and proportions.`;
+        : `Edit only the lying subject's two arms into a fully extended, anatomically natural overhead banzai pose in the direction of their head. The second input image is a pose guide with green lines from each shoulder toward a virtual target. Use those lines for the arm paths, but do not render the green lines. A target may be outside the crop: in that case, continue the arm naturally through the image edge and keep the hand out of frame instead of bending or shortening the arm. The head is at (${Math.round(landmarks.head.x)},${Math.round(landmarks.head.y)}), torso at (${Math.round(landmarks.torso.x)},${Math.round(landmarks.torso.y)}). Match shoulder joints and perspective, not equal lengths in image pixels. Remove traces of the old arm pose inside the mask. Preserve the subject's face, torso, clothing, other people, scene, camera, framing and proportions.`;
       const guide = stage === 'arms' ? makePoseGuide(workingRef.current, landmarks, targets) : null;
       const generated = await editWithProvider({ provider, key, image: workingRef.current, selection: selected, guide, prompt, signal: controller.signal });
       pendingRef.current = composeSelected(workingRef.current, generated, selected);
@@ -305,28 +362,66 @@ export default function BanzaiPosePage() {
   const openAdvanced = () => {
     const image = originalRef.current;
     if (!image) return;
-    abortRef.current?.abort();
     advancedReturnRef.current = {
       image: copyCanvas(workingRef.current || image),
       stage,
       message,
     };
-    workingRef.current = copyCanvas(image);
-    occluderRef.current = makeCanvas(image.width, image.height);
-    armsRef.current = makeCanvas(image.width, image.height);
-    pendingRef.current = null;
-    setLandmarks({}); setHandOverrides({}); setAdvanced(true); setStage('occluder'); setPreview(false);
-    setMessage('詳細調整: 前面人物など、腕に重なる部分だけを塗ってください。遮蔽物がなければスキップできます。');
+    const draft = advancedDraftRef.current;
+    if (draft) {
+      workingRef.current = copyCanvas(draft.image);
+      occluderRef.current = copyCanvas(draft.occluder);
+      armsRef.current = copyCanvas(draft.arms);
+      pendingRef.current = draft.pending ? copyCanvas(draft.pending) : null;
+      setLandmarks(draft.landmarks);
+      setHandOverrides(draft.handOverrides);
+      setStage(draft.stage);
+      setPreview(Boolean(draft.pending));
+      setMessage('前回の詳細調整を復元しました。続きから作業できます。');
+    } else {
+      const plan = autoPlanRef.current;
+      workingRef.current = copyCanvas(image);
+      occluderRef.current = plan ? copyCanvas(plan.occluder) : makeCanvas(image.width, image.height);
+      armsRef.current = plan ? copyCanvas(plan.arms) : makeCanvas(image.width, image.height);
+      pendingRef.current = null;
+      setLandmarks(plan?.landmarks || {});
+      setHandOverrides(plan?.targets || {});
+      setStage('occluder');
+      setPreview(false);
+      setMessage(busy
+        ? '自動解析と並行して調整できます。解析結果は完了後に候補範囲へ反映されます。'
+        : '自動検出した遮蔽物の候補を確認してください。問題がなければそのまま処理できます。');
+    }
+    advancedRef.current = true;
+    setAdvanced(true);
     setVersion((v) => v + 1);
   };
 
   const closeAdvanced = () => {
-    abortRef.current?.abort();
+    advancedRef.current = false;
+    if (stage === 'done') {
+      advancedReturnRef.current = {
+        image: copyCanvas(workingRef.current),
+        stage: 'done',
+        message: '詳細調整した結果を反映しました。完成画像を保存できます。',
+      };
+      advancedDraftRef.current = null;
+    } else {
+      advancedDraftRef.current = {
+        image: copyCanvas(workingRef.current),
+        occluder: copyCanvas(occluderRef.current),
+        arms: copyCanvas(armsRef.current),
+        pending: pendingRef.current ? copyCanvas(pendingRef.current) : null,
+        landmarks: { ...landmarks },
+        handOverrides: { ...handOverrides },
+        stage,
+      };
+    }
     const previous = advancedReturnRef.current;
     if (previous) {
       workingRef.current = previous.image;
       setStage(previous.stage);
-      setMessage(previous.message);
+      setMessage(stage === 'done' ? previous.message : `${previous.message} 詳細調整の途中内容も保持しています。`);
     } else {
       workingRef.current = copyCanvas(originalRef.current);
       setStage('error');
@@ -368,30 +463,30 @@ export default function BanzaiPosePage() {
           <div className="flex items-center justify-between gap-3 rounded-xl bg-slate-800 p-3">
             <button className="shrink-0 rounded bg-slate-600 px-3 py-2 font-medium" onClick={closeAdvanced}>← 通常画面へ戻る</button>
             <div className="min-w-0 text-right">
-              <h2 className="font-semibold">詳細調整</h2>
-              <p className="truncate text-xs text-slate-300">自動結果は保持されています</p>
+              <h2 className="font-semibold">通常工程 2–3 / 4 ＞ 詳細調整</h2>
+              <p className="truncate text-xs text-slate-300">途中内容を保持して往復できます</p>
             </div>
           </div>
           <div className="grid grid-cols-3 gap-2 text-center text-xs sm:text-sm">
-            <span className={`rounded px-2 py-2 ${stage === 'occluder' ? 'bg-blue-600' : 'bg-slate-700'}`}>1 遮蔽物を指定</span>
-            <span className={`rounded px-2 py-2 ${stage === 'arms' ? 'bg-blue-600' : 'bg-slate-700'}`}>2 腕を指定</span>
-            <span className={`rounded px-2 py-2 ${stage === 'done' ? 'bg-green-700' : 'bg-slate-700'}`}>3 確認・保存</span>
+            <span className={`rounded px-2 py-2 ${stage === 'occluder' ? 'bg-blue-600' : 'bg-slate-700'}`}>遮蔽物の補正</span>
+            <span className={`rounded px-2 py-2 ${stage === 'arms' ? 'bg-blue-600' : 'bg-slate-700'}`}>腕の方向</span>
+            <span className={`rounded px-2 py-2 ${stage === 'done' ? 'bg-green-700' : 'bg-slate-700'}`}>確認・反映</span>
           </div>
         </>}
-        <p role="status" className={`rounded p-3 text-sm ${advanced ? 'border border-blue-700 bg-blue-950' : 'bg-slate-800'}`}>{message}</p>
+        <p role="status" className={`min-h-12 rounded p-3 text-sm ${advanced ? 'border border-blue-700 bg-blue-950' : 'bg-slate-800'}`}>{message}</p>
+        <div className={`flex min-h-[38dvh] items-center justify-center rounded-xl bg-slate-950/40 p-2 ${advanced ? 'min-h-[48dvh]' : ''}`}>
+          <canvas ref={canvasRef} onPointerDown={pointerDown} onPointerMove={pointerMove}
+            onPointerUp={() => { pointerRef.current = null; }} onPointerCancel={() => { pointerRef.current = null; }}
+            className="mx-auto block h-auto max-h-[58dvh] max-w-full rounded border border-slate-500"
+            style={{ touchAction: 'none' }} aria-label="画像編集キャンバス" />
+        </div>
         {advanced && stage !== 'done' && !preview && <div className="space-y-3 rounded-xl bg-slate-800 p-3">
           <div>
-            <p className="font-semibold">{stage === 'occluder' ? '画像上で、手前に重なる人物・物だけを塗る' : '画像上で、元の両腕と新しい両腕の範囲を塗る'}</p>
-            <p className="mt-1 text-xs text-slate-300">赤い部分だけがAIの編集対象です。間違えた箇所は「赤い塗りを消す」で戻せます。</p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <button aria-pressed={mode === 'paint'} className={`rounded px-3 py-2 ${mode === 'paint' ? 'bg-rose-600' : 'bg-slate-600'}`} onClick={() => { setMode('paint'); setPointMode(null); }}>＋ 編集範囲を赤く塗る</button>
-            <button aria-pressed={mode === 'erase'} className={`rounded px-3 py-2 ${mode === 'erase' ? 'bg-rose-600' : 'bg-slate-600'}`} onClick={() => { setMode('erase'); setPointMode(null); }}>－ 赤い塗りを消す</button>
-            <label className="flex items-center gap-2 text-sm">太さ <input aria-label="ブラシの太さ" type="range" min="8" max="100" value={brush} onChange={(e) => setBrush(Number(e.target.value))} /></label>
-            <button className="rounded bg-slate-600 px-3 py-2" onClick={() => { activeMask.getContext('2d').clearRect(0, 0, activeMask.width, activeMask.height); setVersion((v) => v + 1); }}>赤い塗りを全部消す</button>
+            <p className="font-semibold">{stage === 'occluder' ? '自動検出した遮蔽物を確認' : '自動検出した腕の方向を確認'}</p>
+            <p className="mt-1 text-xs text-slate-300">{stage === 'occluder' ? '人物の髪・服・影を含めた候補範囲を表示しています。通常は塗り直す必要はありません。' : '肩から緑線の方向へ腕を伸ばします。線が画像外へ続く場合、手先も画面外になるのが正常です。'}</p>
           </div>
           {stage === 'arms' && <div className="space-y-2 border-t border-slate-600 pt-3">
-            <p className="text-sm font-semibold">位置指定：ボタンを押してから、画像上の該当位置を1回タップ</p>
+            <p className="text-sm font-semibold">位置がずれている場合のみ修正</p>
             <div className="flex flex-wrap gap-2">{LANDMARKS.map((name, index) => <button key={name}
               className={`rounded px-3 py-2 ${pointMode === name ? 'bg-amber-600' : 'bg-slate-600'}`}
               onClick={() => setPointMode(name)}>{index + 1}. {LABELS[name]}{landmarks[name] ? ' ✓' : ''}</button>)}</div>
@@ -399,20 +494,30 @@ export default function BanzaiPosePage() {
               className={`rounded px-3 py-2 ${pointMode === name ? 'bg-amber-600' : 'bg-slate-600'}`}
               onClick={() => setPointMode(name)}>{LABELS[name]}を直す{handOverrides[name] ? ' ✓' : ''}</button>)}
               {Object.keys(handOverrides).length > 0 && <button className="rounded bg-slate-600 px-3 py-2" onClick={() => setHandOverrides({})}>手先を自動位置に戻す</button>}</div>}
-            <button className="rounded bg-emerald-700 px-3 py-2" onClick={addTargetCorridors}>緑線に沿う腕の範囲を自動で塗る</button>
+            <div className="flex flex-wrap gap-2">
+              <button className="rounded bg-emerald-700 px-3 py-2" onClick={addTargetCorridors}>腕の編集範囲を自動更新</button>
+              <button className="rounded bg-slate-600 px-3 py-2" onClick={() => extendTargetOutside('left')}>左腕を画面外へ伸ばす</button>
+              <button className="rounded bg-slate-600 px-3 py-2" onClick={() => extendTargetOutside('right')}>右腕を画面外へ伸ばす</button>
+            </div>
           </div>}
+          <details className="border-t border-slate-600 pt-3">
+            <summary className="cursor-pointer text-sm font-semibold">自動範囲に問題がある場合だけ手動補正</summary>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <button aria-pressed={mode === 'paint'} className={`rounded px-3 py-2 ${mode === 'paint' ? 'bg-rose-600' : 'bg-slate-600'}`} onClick={() => { setMode('paint'); setPointMode(null); }}>＋ 範囲を追加</button>
+              <button aria-pressed={mode === 'erase'} className={`rounded px-3 py-2 ${mode === 'erase' ? 'bg-rose-600' : 'bg-slate-600'}`} onClick={() => { setMode('erase'); setPointMode(null); }}>－ 範囲を除外</button>
+              <label className="flex items-center gap-2 text-sm">太さ <input aria-label="ブラシの太さ" type="range" min="8" max="100" value={brush} onChange={(e) => setBrush(Number(e.target.value))} /></label>
+              <button className="rounded bg-slate-600 px-3 py-2" onClick={() => { activeMask.getContext('2d').clearRect(0, 0, activeMask.width, activeMask.height); setVersion((v) => v + 1); }}>補正範囲を消去</button>
+            </div>
+          </details>
           <div className="flex flex-wrap gap-2 border-t border-slate-600 pt-3">
-            <button disabled={busy} className="rounded bg-blue-600 px-4 py-2 font-medium disabled:opacity-50" onClick={run}>{stage === 'occluder' ? '塗った遮蔽物を一時除去' : '塗った範囲に両腕を生成'}</button>
+            <button disabled={busy} className="rounded bg-blue-600 px-4 py-2 font-medium disabled:opacity-50" onClick={run}>{stage === 'occluder' ? '候補の遮蔽物を一時除去' : 'この方向で両腕を生成'}</button>
             {busy && <button className="rounded bg-slate-600 px-4 py-2" onClick={() => abortRef.current?.abort()}>処理を中止</button>}
             {stage === 'occluder' && <button className="rounded bg-slate-600 px-4 py-2" onClick={moveToArms}>遮蔽物はない → 腕の調整へ</button>}
           </div>
         </div>}
-        <canvas ref={canvasRef} onPointerDown={pointerDown} onPointerMove={pointerMove}
-          onPointerUp={() => { pointerRef.current = null; }} onPointerCancel={() => { pointerRef.current = null; }}
-          className={`mx-auto block h-auto max-w-full rounded border border-slate-500 ${advanced ? 'max-h-[52dvh]' : 'max-h-[70vh]'}`}
-          style={{ touchAction: 'none' }} aria-label="画像編集キャンバス" />
         {busy && !advanced && <div className="flex justify-center rounded-xl bg-slate-800 p-4">
           <button className="rounded bg-slate-600 px-4 py-2" onClick={() => abortRef.current?.abort()}>自動処理を中止</button>
+          <button className="ml-2 rounded bg-blue-700 px-4 py-2" onClick={openAdvanced}>解析を待たずに詳細調整</button>
         </div>}
         {stage === 'error' && !advanced && <div className="flex flex-wrap gap-2 rounded-xl bg-slate-800 p-4">
           <button disabled={busy} className="rounded bg-blue-600 px-4 py-2 disabled:opacity-50" onClick={() => runAutomatic(originalRef.current)}>自動処理を再実行</button>
