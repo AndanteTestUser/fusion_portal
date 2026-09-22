@@ -305,10 +305,17 @@ export default function BanzaiPosePage() {
       const elbow = joints?.[`${side}Elbow`];
       const wrist = joints?.[`${side}Wrist`];
       if (elbow && wrist) {
-        for (const c of [ctx, oldCtx]) {
-          c.beginPath(); c.moveTo(shoulder.x, shoulder.y); c.lineTo(elbow.x, elbow.y); c.lineTo(wrist.x, wrist.y); c.stroke();
-          c.beginPath(); c.arc(wrist.x, wrist.y, width * 1.1, 0, Math.PI * 2); c.fill();
-        }
+        ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(elbow.x, elbow.y); ctx.lineTo(wrist.x, wrist.y); ctx.stroke();
+        ctx.beginPath(); ctx.arc(wrist.x, wrist.y, width * 1.1, 0, Math.PI * 2); ctx.fill();
+        // The shoulder joint itself looks nearly the same in the old and new
+        // pose, and is a natural place for another subject's hand to rest; a
+        // full-width round cap starting exactly there would swallow that
+        // hand whole. Inset the old-region stroke's start a third of the way
+        // to the elbow so only the forearm/wrist span that actually looks
+        // different is excluded from restoration.
+        const oldStart = { x: shoulder.x + (elbow.x - shoulder.x) * 0.3, y: shoulder.y + (elbow.y - shoulder.y) * 0.3 };
+        oldCtx.beginPath(); oldCtx.moveTo(oldStart.x, oldStart.y); oldCtx.lineTo(elbow.x, elbow.y); oldCtx.lineTo(wrist.x, wrist.y); oldCtx.stroke();
+        oldCtx.beginPath(); oldCtx.arc(wrist.x, wrist.y, width * 1.1, 0, Math.PI * 2); oldCtx.fill();
       }
       ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(hand.x, hand.y); ctx.stroke();
       // The corridor's round cap at the target is only as wide as the
