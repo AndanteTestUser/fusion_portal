@@ -427,18 +427,17 @@ export function createAutomaticPlan(image, analysis) {
   const occCtx = occluder.getContext('2d');
   occCtx.fillStyle = 'rgba(255,60,80,1)';
   occCtx.strokeStyle = 'rgba(255,60,80,1)';
-  // This dilates the occluder boundary outward on every side by roughly
-  // half of this width, regardless of how close the polygon happens to sit
-  // to the new banzai hand target elsewhere in the mask math. An earlier,
-  // wider value (0.05, up from 0.035) was chosen only to stop thin
-  // under-traced structures like gripping fingers from leaking a sliver of
-  // untouched original through as a disconnected fragment — but that same
-  // growth was confirmed, in review, to also reach far enough to cover a
-  // nearby new hand target that the untouched polygon would have cleared,
-  // so "more generous is low-risk" was wrong: a false-looking "hand hidden
-  // by the occluder" is a worse failure than an occasional thin boundary
-  // sliver. Smaller again, closer to the original value.
-  occCtx.lineWidth = Math.max(8, Math.min(image.width, image.height) * 0.02);
+  // Reverted: shrinking this (0.05 -> 0.02) to stop the mask reaching a
+  // nearby new hand target was confirmed, in review, to not even fix that
+  // case (the arm-render check still flagged the same missing hand), while
+  // it did reopen the original problem this width was chosen to prevent —
+  // a real occluder subject's feet, under-traced at the polygon boundary by
+  // the vision model, were left without enough buffer to be restored, so
+  // the front subject's legs visibly ended with no feet in the final
+  // composite. Back to the wider value; the new-hand-target conflict is a
+  // separate problem this dilation was never the right lever for (see the
+  // warn-not-block handling in the UI instead).
+  occCtx.lineWidth = Math.max(14, Math.min(image.width, image.height) * 0.05);
   occCtx.lineJoin = 'round';
   for (const item of analysis.occluders || []) {
     const polygon = item.polygon.map((point) => fromNormalized(point, image));
