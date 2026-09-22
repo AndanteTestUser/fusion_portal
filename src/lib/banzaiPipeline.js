@@ -382,12 +382,26 @@ function fromNormalized(point, image) {
 }
 
 // Paints one side's armsOldRegion contribution. Prefers the AI-traced visible
-// outline (accurate to the actual photo, whatever the joint estimates say);
-// falls back to the old decreed shoulder-elbow-wrist stroke + wrist circle
-// only when no usable polygon came back (e.g. that arm was fully occluded).
+// outline (accurate to the actual photo, whatever the joint estimates say)
+// for the elbow/wrist/hand portion, but ALWAYS additionally anchors a stroke
+// from the shoulder landmark to the elbow, regardless of whether a polygon
+// came back.
+//
+// This anchor is not optional. BANZAI_KNOWN_ISSUES.md already documents this
+// exact failure mode: once, narrowing this region's start away from the
+// shoulder (for an unrelated reason) left a gap right at the joint, and
+// restoreOccluder — which pastes back original pre-edit pixels anywhere the
+// occluder mask isn't excluded by this region — treated that gap as
+// legitimate occluder content and leaked the pre-edit shoulder back in as a
+// visible ghost. An AI-traced polygon has the same risk: nothing guarantees
+// its boundary reaches all the way to the torso attachment (clothing,
+// tracing conservatism, occlusion at the joint itself), so it cannot be
+// trusted alone to cover the shoulder the way a geometric line anchored at
+// the shoulder coordinate always does.
 // ctx must already have fillStyle/strokeStyle/lineWidth/lineCap/lineJoin set
 // by the caller.
 export function paintOldArmRegion(ctx, { polygon, shoulder, elbow, wrist, oldWristRadius }) {
+  ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(elbow.x, elbow.y); ctx.stroke();
   if (polygon && polygon.length >= 3) {
     ctx.beginPath();
     ctx.moveTo(polygon[0].x, polygon[0].y);
@@ -400,7 +414,7 @@ export function paintOldArmRegion(ctx, { polygon, shoulder, elbow, wrist, oldWri
     ctx.stroke();
     return;
   }
-  ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(elbow.x, elbow.y); ctx.lineTo(wrist.x, wrist.y); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(elbow.x, elbow.y); ctx.lineTo(wrist.x, wrist.y); ctx.stroke();
   ctx.beginPath(); ctx.arc(wrist.x, wrist.y, oldWristRadius, 0, Math.PI * 2); ctx.fill();
 }
 
