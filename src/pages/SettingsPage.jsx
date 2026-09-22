@@ -64,6 +64,7 @@ function ProviderRow({ provider }) {
       <div className="flex gap-2">
         <input
           type={showKey ? 'text' : 'password'}
+          name={`apikey-${provider.id}`}
           className="min-w-0 flex-1 rounded border border-neutral-600 bg-neutral-900 px-3 py-2 text-sm text-white"
           placeholder="APIキー"
           value={apiKey}
@@ -135,43 +136,51 @@ function WkGasSection() {
         iOSの共有シート→ショートカット経由で送られた画像を、Google Apps Script(GAS)の中継Webアプリ経由で
         自動的に取り込みます。デプロイ方法は <code>gas/README.md</code> を参照してください。
       </p>
-      <label className="flex flex-col gap-1 text-xs text-neutral-400">
-        <span>GAS Web AppのURL</span>
-        <input
-          type="url"
-          className="rounded border border-neutral-600 bg-neutral-900 px-3 py-2 text-sm text-white"
-          placeholder="https://script.google.com/macros/s/.../exec"
-          value={url}
-          onChange={(e) => setUrl(e.target.value)}
-        />
-      </label>
-      <label className="flex flex-col gap-1 text-xs text-neutral-400">
-        <span>共有シークレット</span>
-        <input
-          type="password"
-          className="rounded border border-neutral-600 bg-neutral-900 px-3 py-2 text-sm text-white"
-          placeholder="ショートカット側と同じ値"
-          value={secret}
-          onChange={(e) => setSecret(e.target.value)}
-          autoComplete="off"
-        />
-      </label>
-      <label className="flex items-center gap-2 text-xs text-neutral-300">
-        <input
-          type="checkbox"
-          checked={gasConfig.autoPoll}
-          onChange={(e) => handleAutoPollChange(e.target.checked)}
-        />
-        アプリを開いている間、自動的にバックグラウンドで取り込む(既定はオフ)
-      </label>
-      <div className="flex flex-wrap gap-2">
-        <button type="button" className="btn" onClick={handleSave}>
-          💾 保存
-        </button>
-        <button type="button" className="btn" onClick={() => fetchFromGas()} disabled={gasStatus.busy}>
-          {gasStatus.busy ? '取り込み中...' : '🔄 今すぐ取り込む'}
-        </button>
-      </div>
+      <form
+        className="flex flex-col gap-3"
+        onSubmit={(e) => { e.preventDefault(); handleSave(); }}
+      >
+        <label className="flex flex-col gap-1 text-xs text-neutral-400">
+          <span>GAS Web AppのURL</span>
+          <input
+            type="url"
+            name="gas-webapp-url"
+            autoComplete="off"
+            className="rounded border border-neutral-600 bg-neutral-900 px-3 py-2 text-sm text-white"
+            placeholder="https://script.google.com/macros/s/.../exec"
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+          />
+        </label>
+        <label className="flex flex-col gap-1 text-xs text-neutral-400">
+          <span>共有シークレット</span>
+          <input
+            type="password"
+            name="gas-shared-secret"
+            className="rounded border border-neutral-600 bg-neutral-900 px-3 py-2 text-sm text-white"
+            placeholder="ショートカット側と同じ値"
+            value={secret}
+            onChange={(e) => setSecret(e.target.value)}
+            autoComplete="off"
+          />
+        </label>
+        <label className="flex items-center gap-2 text-xs text-neutral-300">
+          <input
+            type="checkbox"
+            checked={gasConfig.autoPoll}
+            onChange={(e) => handleAutoPollChange(e.target.checked)}
+          />
+          アプリを開いている間、自動的にバックグラウンドで取り込む(既定はオフ)
+        </label>
+        <div className="flex flex-wrap gap-2">
+          <button type="submit" className="btn">
+            💾 保存
+          </button>
+          <button type="button" className="btn" onClick={() => fetchFromGas()} disabled={gasStatus.busy}>
+            {gasStatus.busy ? '取り込み中...' : '🔄 今すぐ取り込む'}
+          </button>
+        </div>
+      </form>
       {gasStatus.message && <p className="text-xs text-amber-400">{gasStatus.message}</p>}
       <p className="text-[11px] text-neutral-500">
         このURL・シークレットはこの端末にのみ平文で保存されます(APIキーのVaultとは異なり暗号化はしていません)。
