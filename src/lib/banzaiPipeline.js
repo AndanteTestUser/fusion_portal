@@ -381,41 +381,37 @@ function fromNormalized(point, image) {
   return { x: point.x * image.width / 1000, y: point.y * image.height / 1000 };
 }
 
-// Paints one side's armsOldRegion contribution. Prefers the AI-traced visible
-// outline (accurate to the actual photo, whatever the joint estimates say)
-// for the elbow/wrist/hand portion, but ALWAYS additionally anchors a stroke
-// from the shoulder landmark to the elbow, regardless of whether a polygon
-// came back.
+// Paints one side's armsOldRegion contribution.
 //
-// This anchor is not optional. BANZAI_KNOWN_ISSUES.md already documents this
-// exact failure mode: once, narrowing this region's start away from the
-// shoulder (for an unrelated reason) left a gap right at the joint, and
-// restoreOccluder — which pastes back original pre-edit pixels anywhere the
-// occluder mask isn't excluded by this region — treated that gap as
-// legitimate occluder content and leaked the pre-edit shoulder back in as a
-// visible ghost. An AI-traced polygon has the same risk: nothing guarantees
-// its boundary reaches all the way to the torso attachment (clothing,
-// tracing conservatism, occlusion at the joint itself), so it cannot be
-// trusted alone to cover the shoulder the way a geometric line anchored at
-// the shoulder coordinate always does.
+// Always draws the full shoulder-elbow-wrist geometric path + wrist circle,
+// unconditionally, regardless of whether an AI-traced polygon is available —
+// this is the same baseline the pipeline used before visibleArms existed,
+// and it covers the WHOLE joint chain, not one specific joint. A per-joint
+// "use the polygon here, fall back to geometry there" branch is exactly the
+// kind of fragile, image-specific patch BANZAI_KNOWN_ISSUES.md already warns
+// against: whichever joint happens to be the one an AI polygon falls short
+// at varies photo to photo, so hand-picking one joint to hard-guarantee (as
+// an earlier version of this function did, for the shoulder specifically)
+// just moves the same ghosting bug to the next joint on the next image.
+//
+// The AI-traced polygon, when available, is layered ON TOP of that
+// unconditional baseline — pure addition, never a replacement — for the
+// extra precision a straight-line approximation can't give (actual sleeve
+// bulge, finger spread, etc.). Because it only adds coverage, it can never
+// reopen a gap the geometric baseline already closed, anywhere along the arm.
 // ctx must already have fillStyle/strokeStyle/lineWidth/lineCap/lineJoin set
 // by the caller.
 export function paintOldArmRegion(ctx, { polygon, shoulder, elbow, wrist, oldWristRadius }) {
-  ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(elbow.x, elbow.y); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(elbow.x, elbow.y); ctx.lineTo(wrist.x, wrist.y); ctx.stroke();
+  ctx.beginPath(); ctx.arc(wrist.x, wrist.y, oldWristRadius, 0, Math.PI * 2); ctx.fill();
   if (polygon && polygon.length >= 3) {
     ctx.beginPath();
     ctx.moveTo(polygon[0].x, polygon[0].y);
     for (const point of polygon.slice(1)) ctx.lineTo(point.x, point.y);
     ctx.closePath();
     ctx.fill();
-    // Stroking the same path adds a small buffer for the AI polygon's own
-    // boundary imprecision, same role the wrist circle plays for the
-    // geometric fallback below.
     ctx.stroke();
-    return;
   }
-  ctx.beginPath(); ctx.moveTo(elbow.x, elbow.y); ctx.lineTo(wrist.x, wrist.y); ctx.stroke();
-  ctx.beginPath(); ctx.arc(wrist.x, wrist.y, oldWristRadius, 0, Math.PI * 2); ctx.fill();
 }
 
 export function createAutomaticPlan(image, analysis) {
