@@ -296,6 +296,69 @@ export async function analyzePoseWithProvider({ provider, key, image, signal }) 
   return normalizePose(parseStructuredJson(text));
 }
 
+const ARM_CHECK_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  properties: { bothArmsRendered: { type: 'boolean' }, reason: { type: 'string' } },
+  required: ['bothArmsRendered', 'reason'],
+};
+
+// selectedChangeRatio only confirms the mask region changed at all, which
+// passes even when the edit model erases the old arm and draws nothing
+// coherent back — the mask region ends up looking like plain background,
+// "some change" happened, and the pipeline reports success with no arm
+// actually rendered. This asks the vision model to specifically check that
+// a real limb (not necessarily a perfect pose, just an actual continuous
+// arm reaching to a hand or the frame edge) exists before the result is
+// ever shown as done.
+export async function verifyArmsRendered({ provider, key, image, signal }) {
+  if (!key) throw new Error(`${provider === 'openai' ? 'OpenAI' : 'Gemini'}のAPIキーを設定してください`);
+  const instruction = "Look only at the main lying/reclining subject's two arms in this image. bothArmsRendered must be false if either arm is simply missing, cut off with no visible stub at the shoulder, replaced by background/floor/another person's limb, or ends without a hand or wrist — regardless of whether the pose itself looks natural or well-posed. reason: one short sentence explaining the verdict.";
+  const imageDataUrl = analysisImageDataUrl(image);
+
+  if (provider === 'openai') {
+    const response = await providerFetch('https://api.openai.com/v1/responses', {
+      method: 'POST', signal,
+      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: DEFAULT_OPENAI_VISION_MODEL,
+        input: [{ role: 'user', content: [
+          { type: 'input_text', text: instruction },
+          { type: 'input_image', image_url: imageDataUrl, detail: 'high' },
+        ] }],
+        text: { format: { type: 'json_schema', name: 'banzai_arm_check', strict: true, schema: ARM_CHECK_SCHEMA } },
+      }),
+    }, 'OpenAI');
+    if (!response.ok) await responseError(response);
+    const text = openAIOutputText(await response.json());
+    if (!text) throw new Error('OpenAIから腕の確認結果が返されませんでした');
+    const parsed = parseStructuredJson(text);
+    return { ok: Boolean(parsed.bothArmsRendered), reason: String(parsed.reason || '') };
+  }
+
+  const response = await providerFetch(`https://generativelanguage.googleapis.com/v1beta/models/${DEFAULT_GEMINI_MODEL}:generateContent`, {
+    method: 'POST', signal,
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+    body: JSON.stringify({
+      contents: [{ role: 'user', parts: [
+        { text: instruction },
+        { inlineData: { mimeType: 'image/jpeg', data: imageDataUrl.split(',')[1] } },
+      ] }],
+      generationConfig: {
+        responseModalities: ['TEXT'],
+        responseMimeType: 'application/json',
+        responseSchema: ARM_CHECK_SCHEMA,
+        maxOutputTokens: 1024,
+      },
+    }),
+  }, 'Gemini');
+  if (!response.ok) await responseError(response);
+  const json = await response.json();
+  const text = json.candidates?.[0]?.content?.parts?.filter((part) => part.text).map((part) => part.text).join('');
+  if (!text) throw new Error('Geminiから腕の確認結果が返されませんでした');
+  const parsed = parseStructuredJson(text);
+  return { ok: Boolean(parsed.bothArmsRendered), reason: String(parsed.reason || '') };
+}
+
 function fromNormalized(point, image) {
   return { x: point.x * image.width / 1000, y: point.y * image.height / 1000 };
 }
