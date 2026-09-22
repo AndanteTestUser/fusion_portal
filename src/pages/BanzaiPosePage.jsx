@@ -65,6 +65,7 @@ export default function BanzaiPosePage() {
   const [pointMode, setPointMode] = useState(null);
   const [landmarks, setLandmarks] = useState({});
   const [handOverrides, setHandOverrides] = useState({});
+  const [finishing, setFinishing] = useState(false);
   const [version, setVersion] = useState(0);
   const originalRef = useRef(null);
   const workingRef = useRef(null);
@@ -77,6 +78,15 @@ export default function BanzaiPosePage() {
   // user's own explicit selection), so it's mirrored into both directly.
   const occluderCoreRef = useRef(null);
   const armsRef = useRef(null);
+  // The pre-restore composite (arm-edited, occluder not yet pasted back) and
+  // a working copy of the mask restoreOccluder used, captured right before
+  // each restore call. Together they let the finishing eraser recompute
+  // restoreOccluder(preRestoreRef.current, originalRef.current, finishMaskRef.current)
+  // locally in the browser on every brush stroke — no AI call, since both
+  // source layers are already fully rendered and only the mask boundary
+  // between them needs adjusting.
+  const preRestoreRef = useRef(null);
+  const finishMaskRef = useRef(null);
   const canvasRef = useRef(null);
   const pointerRef = useRef(null);
   const abortRef = useRef(null);
@@ -107,6 +117,12 @@ export default function BanzaiPosePage() {
       ctx.drawImage(activeMask, 0, 0);
       ctx.restore();
     }
+    if (finishing && finishMaskRef.current) {
+      ctx.save();
+      ctx.globalAlpha = 0.4;
+      ctx.drawImage(finishMaskRef.current, 0, 0);
+      ctx.restore();
+    }
     if (advanced && stage === 'arms' && targets && !preview) {
       ctx.save();
       ctx.strokeStyle = '#22c55e';
@@ -127,7 +143,7 @@ export default function BanzaiPosePage() {
         ctx.fillText(LABELS[name], point.x + 9, point.y - 9);
       }
     }
-  }, [version, stage, preview, advanced, activeImage, activeMask, landmarks, targets?.leftHand.x, targets?.leftHand.y, targets?.rightHand.x, targets?.rightHand.y]);
+  }, [version, stage, preview, advanced, finishing, activeImage, activeMask, landmarks, targets?.leftHand.x, targets?.leftHand.y, targets?.rightHand.x, targets?.rightHand.y]);
 
   async function runAutomatic(image) {
     const key = entries[provider]?.apiKey;
@@ -138,7 +154,7 @@ export default function BanzaiPosePage() {
     }
     const controller = new AbortController();
     abortRef.current = controller;
-    setAdvanced(false); setPreview(false); setBusy(true); setStage('analyzing');
+    setAdvanced(false); setPreview(false); setFinishing(false); setBusy(true); setStage('analyzing');
     setMessage('対象人物・両腕・前面の遮蔽物を自動解析しています…');
     try {
       const analysis = await analyzePoseWithProvider({ provider, key, image, signal: controller.signal });
@@ -193,6 +209,8 @@ export default function BanzaiPosePage() {
       });
       let result = composeSelected(base, generated, plan.arms);
       if (selectedChangeRatio(base, result, plan.arms) < 0.005) throw new Error('両腕の変化を確認できませんでした');
+      preRestoreRef.current = copyCanvas(result);
+      finishMaskRef.current = copyCanvas(plan.occluderCore);
       result = restoreOccluder(result, image, plan.occluderCore);
       // Verify the actual final image the user will see (after occluder
       // restore), not the pre-restore intermediate: restoreOccluder is
@@ -234,7 +252,9 @@ export default function BanzaiPosePage() {
     advancedDraftRef.current = null;
     advancedReturnRef.current = null;
     manualTouchedRef.current = { occluder: false, arms: false, points: false };
-    setLandmarks({}); setHandOverrides({}); setPreview(false); setAdvanced(false);
+    preRestoreRef.current = null;
+    finishMaskRef.current = null;
+    setLandmarks({}); setHandOverrides({}); setPreview(false); setAdvanced(false); setFinishing(false);
     setVersion((v) => v + 1);
     runAutomatic(image);
   }
@@ -294,10 +314,25 @@ export default function BanzaiPosePage() {
     setVersion((v) => v + 1);
   };
 
+  // Adjusts the boundary between the two already-rendered final layers —
+  // the restored occluder and the pre-restore (arm-edited) composite —
+  // without any AI call. "erase" (mode 'erase') shrinks the mask, revealing
+  // the arm-edited layer where the occluder was wrongly painted over it;
+  // "paint" (mode 'paint') grows it, revealing the occluder where automatic
+  // detection under-covered it. Both directions recompute the same way:
+  // restoreOccluder from the two cached source layers using the edited mask.
+  const finishStroke = (from, to) => {
+    paintStroke(finishMaskRef.current, from, to);
+    workingRef.current = restoreOccluder(preRestoreRef.current, originalRef.current, finishMaskRef.current);
+    setVersion((v) => v + 1);
+  };
+
   const pointerDown = (event) => {
-    if (!advanced || busy || preview || !workingRef.current) return;
+    if (busy || preview || !workingRef.current) return;
+    if (!advanced && !finishing) return;
     event.currentTarget.setPointerCapture(event.pointerId);
     const at = position(event);
+    if (finishing) { pointerRef.current = at; finishStroke(at, at); return; }
     if (pointMode) {
       manualTouchedRef.current.points = true;
       if (pointMode.endsWith('Hand')) setHandOverrides((current) => ({ ...current, [pointMode]: at }));
@@ -308,6 +343,7 @@ export default function BanzaiPosePage() {
   const pointerMove = (event) => {
     if (!pointerRef.current || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
     const at = position(event);
+    if (finishing) { finishStroke(pointerRef.current, at); pointerRef.current = at; return; }
     stroke(pointerRef.current, at);
     pointerRef.current = at;
   };
@@ -416,6 +452,8 @@ export default function BanzaiPosePage() {
       workingRef.current = pendingRef.current; pendingRef.current = null; moveToArms();
       return;
     }
+    preRestoreRef.current = copyCanvas(pendingRef.current);
+    finishMaskRef.current = copyCanvas(occluderCoreRef.current);
     const restored = restoreOccluder(pendingRef.current, originalRef.current, occluderCoreRef.current);
     // restoreOccluder is exactly the step that has repeatedly reintroduced or
     // erased arm pixels in this pipeline's history (shoulder-swallowed
@@ -494,6 +532,7 @@ export default function BanzaiPosePage() {
     }
     advancedRef.current = true;
     setAdvanced(true);
+    setFinishing(false);
     setVersion((v) => v + 1);
   };
 
@@ -531,6 +570,7 @@ export default function BanzaiPosePage() {
     pendingRef.current = null;
     setPreview(false);
     setAdvanced(false);
+    setFinishing(false);
     setPointMode(null);
     setVersion((v) => v + 1);
   };
@@ -633,8 +673,26 @@ export default function BanzaiPosePage() {
           <button disabled={busy} className="rounded bg-slate-600 px-4 py-2 disabled:opacity-50" onClick={revise}>範囲を修正して再実行</button>
           <button disabled={busy} className="rounded bg-slate-600 px-4 py-2 disabled:opacity-50" onClick={() => download(pendingRef.current, `banzai_${stage}_preview.png`)}>途中画像を保存</button>
         </div>}
-        {stage === 'done' && <div className="flex flex-wrap gap-2 rounded-xl bg-slate-800 p-4">
+        {stage === 'done' && finishing && <div className="space-y-3 rounded-xl bg-slate-800 p-3">
+          <div>
+            <p className="font-semibold">仕上がりの境界線を微調整</p>
+            <p className="mt-1 text-xs text-slate-300">
+              遮蔽物の判定・腕の変換自体は正しくても、境界線がずれて誤った側のレイヤーが前面に来ることがあります。
+              「－ 消去」で前面(遮蔽物)を消して奥の腕側を出し、「＋ 追加」で逆に遮蔽物側を出せます。AIは呼ばず、その場で再合成します。
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button aria-pressed={mode === 'paint'} className={`rounded px-3 py-2 ${mode === 'paint' ? 'bg-rose-600' : 'bg-slate-600'}`} onClick={() => setMode('paint')}>＋ 遮蔽物側を出す</button>
+            <button aria-pressed={mode === 'erase'} className={`rounded px-3 py-2 ${mode === 'erase' ? 'bg-rose-600' : 'bg-slate-600'}`} onClick={() => setMode('erase')}>－ 遮蔽物側を消す(腕側を出す)</button>
+            <label className="flex items-center gap-2 text-sm">太さ <input aria-label="ブラシの太さ" type="range" min="8" max="100" value={brush} onChange={(e) => setBrush(Number(e.target.value))} /></label>
+          </div>
+          <div className="flex flex-wrap gap-2 border-t border-slate-600 pt-3">
+            <button className="rounded bg-green-700 px-4 py-2" onClick={() => setFinishing(false)}>調整を完了</button>
+          </div>
+        </div>}
+        {stage === 'done' && !finishing && <div className="flex flex-wrap gap-2 rounded-xl bg-slate-800 p-4">
           <button className="rounded bg-green-700 px-4 py-2" onClick={() => download(workingRef.current, 'banzai_result.png')}>完成画像を保存</button>
+          <button className="rounded bg-amber-700 px-4 py-2" onClick={() => setFinishing(true)}>仕上がりを微調整</button>
           {!advanced && <button className="rounded bg-blue-700 px-4 py-2" onClick={() => runAutomatic(originalRef.current)}>同じ原画像でもう一度</button>}
           {!advanced && <button className="rounded bg-slate-600 px-4 py-2" onClick={openAdvanced}>詳細調整</button>}
           {advanced && <button className="rounded bg-slate-600 px-4 py-2" onClick={closeAdvanced}>調整を終了して通常画面へ</button>}
