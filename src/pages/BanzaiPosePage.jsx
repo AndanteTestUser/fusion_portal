@@ -297,6 +297,10 @@ export default function BanzaiPosePage() {
         ctx.beginPath(); ctx.arc(wrist.x, wrist.y, width * 1.1, 0, Math.PI * 2); ctx.fill();
       }
       ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(hand.x, hand.y); ctx.stroke();
+      // The corridor's round cap at the target is only as wide as the
+      // forearm; give the new hand the same buffer as the original wrist
+      // above, or it gets clipped off by the mask boundary during composite.
+      ctx.beginPath(); ctx.arc(hand.x, hand.y, width * 1.1, 0, Math.PI * 2); ctx.fill();
     }
     ctx.restore();
     setMessage('肩から目標方向までの編集範囲を自動設定しました。通常はこのまま生成できます。');

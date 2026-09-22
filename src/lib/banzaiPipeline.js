@@ -320,12 +320,23 @@ export function createAutomaticPlan(image, analysis) {
     armCtx.beginPath(); armCtx.moveTo(shoulder.x, shoulder.y); armCtx.lineTo(joints[`${side}Elbow`].x, joints[`${side}Elbow`].y); armCtx.lineTo(wrist.x, wrist.y); armCtx.stroke();
     armCtx.beginPath(); armCtx.arc(wrist.x, wrist.y, handRadius, 0, Math.PI * 2); armCtx.fill();
     armCtx.beginPath(); armCtx.moveTo(shoulder.x, shoulder.y); armCtx.lineTo(targets[`${side}Hand`].x, targets[`${side}Hand`].y); armCtx.stroke();
+    // The reach corridor's stroke only gives the target endpoint a round cap
+    // as wide as the forearm; a hand needs more room than that, exactly like
+    // the original wrist above, or the generated hand gets clipped off by the
+    // mask boundary and only the sleeve survives the final composite.
+    armCtx.beginPath(); armCtx.arc(targets[`${side}Hand`].x, targets[`${side}Hand`].y, handRadius, 0, Math.PI * 2); armCtx.fill();
   }
   const occluder = makeCanvas(image.width, image.height);
   const occCtx = occluder.getContext('2d');
   occCtx.fillStyle = 'rgba(255,60,80,1)';
   occCtx.strokeStyle = 'rgba(255,60,80,1)';
-  occCtx.lineWidth = Math.max(10, Math.min(image.width, image.height) * 0.035);
+  // Widened from 0.035/10 (see fix history): thin structures like fingers
+  // gripping the subject are easy for the vision model to under-trace, and
+  // any sliver missed here is never restored, leaking the untouched original
+  // pixel straight through to the final composite as a disconnected
+  // fragment. This only grows the "restore from the original photo" zone, so
+  // making it more generous is low-risk.
+  occCtx.lineWidth = Math.max(14, Math.min(image.width, image.height) * 0.05);
   occCtx.lineJoin = 'round';
   for (const item of analysis.occluders || []) {
     const polygon = item.polygon.map((point) => fromNormalized(point, image));
