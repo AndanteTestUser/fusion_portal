@@ -66,6 +66,20 @@ export default function BanzaiPosePage() {
   const [landmarks, setLandmarks] = useState({});
   const [handOverrides, setHandOverrides] = useState({});
   const [finishing, setFinishing] = useState(false);
+  // General-purpose touch-up: unlike the finishing eraser above (which only
+  // re-draws the boundary between two already-rendered layers), this sends
+  // a user-painted region plus a short free-text instruction to the image
+  // AI as a fresh edit. It exists because the pipeline's automatic masks
+  // (arms, occluder) only ever cover what the automatic analysis predicted
+  // needs editing — anything the user notices afterward outside those
+  // regions (e.g. a limb or the torso not actually resting on the surface
+  // beneath it) has no other path to a fix. Contact with the floor/mat is
+  // not always correct or required (a genuinely airborne pose is fine); this
+  // is not an automatic check for it, just a way to act once a person has
+  // judged something looks wrong.
+  const [retouching, setRetouching] = useState(false);
+  const [retouchPrompt, setRetouchPrompt] = useState('');
+  const [hasRetouchPreview, setHasRetouchPreview] = useState(false);
   const [version, setVersion] = useState(0);
   const originalRef = useRef(null);
   const workingRef = useRef(null);
@@ -87,6 +101,8 @@ export default function BanzaiPosePage() {
   // between them needs adjusting.
   const preRestoreRef = useRef(null);
   const finishMaskRef = useRef(null);
+  const retouchMaskRef = useRef(null);
+  const retouchPreviewRef = useRef(null);
   const canvasRef = useRef(null);
   const pointerRef = useRef(null);
   const abortRef = useRef(null);
@@ -99,7 +115,9 @@ export default function BanzaiPosePage() {
   const estimated = estimateBanzaiTargets(landmarks);
   const targets = estimated ? { ...estimated, ...handOverrides } : null;
   const activeMask = stage === 'occluder' ? occluderRef.current : armsRef.current;
-  const activeImage = preview ? pendingRef.current : workingRef.current;
+  const activeImage = preview
+    ? pendingRef.current
+    : retouching && hasRetouchPreview ? retouchPreviewRef.current : workingRef.current;
 
   useEffect(() => { advancedRef.current = advanced; }, [advanced]);
 
@@ -123,6 +141,12 @@ export default function BanzaiPosePage() {
       ctx.drawImage(finishMaskRef.current, 0, 0);
       ctx.restore();
     }
+    if (retouching && !hasRetouchPreview && retouchMaskRef.current) {
+      ctx.save();
+      ctx.globalAlpha = 0.4;
+      ctx.drawImage(retouchMaskRef.current, 0, 0);
+      ctx.restore();
+    }
     if (advanced && stage === 'arms' && targets && !preview) {
       ctx.save();
       ctx.strokeStyle = '#22c55e';
@@ -143,7 +167,7 @@ export default function BanzaiPosePage() {
         ctx.fillText(LABELS[name], point.x + 9, point.y - 9);
       }
     }
-  }, [version, stage, preview, advanced, finishing, activeImage, activeMask, landmarks, targets?.leftHand.x, targets?.leftHand.y, targets?.rightHand.x, targets?.rightHand.y]);
+  }, [version, stage, preview, advanced, finishing, retouching, hasRetouchPreview, activeImage, activeMask, landmarks, targets?.leftHand.x, targets?.leftHand.y, targets?.rightHand.x, targets?.rightHand.y]);
 
   async function runAutomatic(image) {
     const key = entries[provider]?.apiKey;
@@ -154,7 +178,7 @@ export default function BanzaiPosePage() {
     }
     const controller = new AbortController();
     abortRef.current = controller;
-    setAdvanced(false); setPreview(false); setFinishing(false); setBusy(true); setStage('analyzing');
+    setAdvanced(false); setPreview(false); setFinishing(false); setRetouching(false); setBusy(true); setStage('analyzing');
     setMessage('対象人物・両腕・前面の遮蔽物を自動解析しています…');
     try {
       const analysis = await analyzePoseWithProvider({ provider, key, image, signal: controller.signal });
@@ -254,7 +278,10 @@ export default function BanzaiPosePage() {
     manualTouchedRef.current = { occluder: false, arms: false, points: false };
     preRestoreRef.current = null;
     finishMaskRef.current = null;
+    retouchMaskRef.current = null;
+    retouchPreviewRef.current = null;
     setLandmarks({}); setHandOverrides({}); setPreview(false); setAdvanced(false); setFinishing(false);
+    setRetouching(false); setHasRetouchPreview(false); setRetouchPrompt('');
     setVersion((v) => v + 1);
     runAutomatic(image);
   }
@@ -327,12 +354,18 @@ export default function BanzaiPosePage() {
     setVersion((v) => v + 1);
   };
 
+  const retouchStroke = (from, to) => {
+    paintStroke(retouchMaskRef.current, from, to);
+    setVersion((v) => v + 1);
+  };
+
   const pointerDown = (event) => {
     if (busy || preview || !workingRef.current) return;
-    if (!advanced && !finishing) return;
+    if (!advanced && !finishing && !(retouching && !hasRetouchPreview)) return;
     event.currentTarget.setPointerCapture(event.pointerId);
     const at = position(event);
     if (finishing) { pointerRef.current = at; finishStroke(at, at); return; }
+    if (retouching) { if (!hasRetouchPreview) { pointerRef.current = at; retouchStroke(at, at); } return; }
     if (pointMode) {
       manualTouchedRef.current.points = true;
       if (pointMode.endsWith('Hand')) setHandOverrides((current) => ({ ...current, [pointMode]: at }));
@@ -344,6 +377,7 @@ export default function BanzaiPosePage() {
     if (!pointerRef.current || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
     const at = position(event);
     if (finishing) { finishStroke(pointerRef.current, at); pointerRef.current = at; return; }
+    if (retouching) { retouchStroke(pointerRef.current, at); pointerRef.current = at; return; }
     stroke(pointerRef.current, at);
     pointerRef.current = at;
   };
@@ -495,6 +529,78 @@ export default function BanzaiPosePage() {
 
   const revise = () => { pendingRef.current = null; setPreview(false); setVersion((v) => v + 1); };
 
+  const retouchStart = () => {
+    const image = workingRef.current;
+    if (!image) return;
+    retouchMaskRef.current = makeCanvas(image.width, image.height);
+    retouchPreviewRef.current = null;
+    setHasRetouchPreview(false);
+    setRetouchPrompt('');
+    setRetouching(true);
+    setMode('paint');
+    setMessage('直したい範囲を塗り、直したい内容を短く入力してから生成してください。');
+    setVersion((v) => v + 1);
+  };
+
+  const retouchClose = () => {
+    setRetouching(false);
+    retouchMaskRef.current = null;
+    retouchPreviewRef.current = null;
+    setHasRetouchPreview(false);
+    setRetouchPrompt('');
+    setVersion((v) => v + 1);
+  };
+
+  // A general free-form edit, unlike run()/accept() above which always send
+  // one of the pipeline's own fixed prompts (occluder removal or the banzai
+  // arm pose). This exists for whatever the user notices is wrong in the
+  // finished image that the automatic masks never covered — the prompt and
+  // the selected region are both theirs to choose, so it is not limited to
+  // arms, occluders, or floor contact specifically.
+  const retouchRun = async () => {
+    if (!maskHasPaint(retouchMaskRef.current)) return setMessage('直したい範囲を塗ってください。');
+    if (!retouchPrompt.trim()) return setMessage('直したい内容を短く入力してください。');
+    const key = entries[provider]?.apiKey;
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setBusy(true);
+    setMessage(`${provider === 'openai' ? 'OpenAI' : 'Gemini'}で選択範囲を修正中…`);
+    try {
+      const generated = await editWithProvider({
+        provider, key, image: workingRef.current, selection: retouchMaskRef.current, signal: controller.signal,
+        prompt: `Edit only the pixels inside the transparent area of the mask. ${retouchPrompt.trim()} Keep every pixel outside the mask exactly as it is, and preserve the camera angle, perspective, lighting and style.`,
+      });
+      const result = composeSelected(workingRef.current, generated, retouchMaskRef.current);
+      if (selectedChangeRatio(workingRef.current, result, retouchMaskRef.current) < 0.005) throw new Error('選択範囲の変化を確認できませんでした。範囲や指示を見直して再実行してください');
+      retouchPreviewRef.current = result;
+      setHasRetouchPreview(true);
+      setMessage('修正結果のプレビューです。問題なければ採用してください。');
+      setVersion((v) => v + 1);
+    } catch (error) {
+      setMessage(error.name === 'AbortError' ? '処理を中止しました。' : `修正に失敗しました: ${error.message}`);
+    } finally {
+      setBusy(false); abortRef.current = null;
+    }
+  };
+
+  const retouchAccept = () => {
+    if (!retouchPreviewRef.current) return;
+    workingRef.current = retouchPreviewRef.current;
+    retouchPreviewRef.current = null;
+    retouchMaskRef.current = makeCanvas(workingRef.current.width, workingRef.current.height);
+    setHasRetouchPreview(false);
+    setRetouchPrompt('');
+    setMessage('選択範囲の修正を反映しました。続けて別の箇所も直せます。');
+    setVersion((v) => v + 1);
+  };
+
+  const retouchRevise = () => {
+    retouchPreviewRef.current = null;
+    setHasRetouchPreview(false);
+    setMessage('プレビューを破棄しました。範囲か指示を見直して再生成してください。');
+    setVersion((v) => v + 1);
+  };
+
   const openAdvanced = () => {
     const image = originalRef.current;
     if (!image) return;
@@ -533,6 +639,7 @@ export default function BanzaiPosePage() {
     advancedRef.current = true;
     setAdvanced(true);
     setFinishing(false);
+    setRetouching(false);
     setVersion((v) => v + 1);
   };
 
@@ -571,6 +678,7 @@ export default function BanzaiPosePage() {
     setPreview(false);
     setAdvanced(false);
     setFinishing(false);
+    setRetouching(false);
     setPointMode(null);
     setVersion((v) => v + 1);
   };
@@ -690,9 +798,43 @@ export default function BanzaiPosePage() {
             <button className="rounded bg-green-700 px-4 py-2" onClick={() => setFinishing(false)}>調整を完了</button>
           </div>
         </div>}
-        {stage === 'done' && !finishing && <div className="flex flex-wrap gap-2 rounded-xl bg-slate-800 p-4">
+        {stage === 'done' && retouching && <div className="space-y-3 rounded-xl bg-slate-800 p-3">
+          <div>
+            <p className="font-semibold">気になる箇所を直す</p>
+            <p className="mt-1 text-xs text-slate-300">
+              自動処理の範囲外でも、床・マットへの接地のように見た目で気になった箇所を自由に選んで直せます。
+              直したい範囲を塗り、直したい内容を一言入力して生成してください。自動チェックの対象外なので、結果は必ず目視で確認してください。
+            </p>
+          </div>
+          {!hasRetouchPreview && <>
+            <div className="flex flex-wrap items-center gap-2">
+              <button aria-pressed={mode === 'paint'} className={`rounded px-3 py-2 ${mode === 'paint' ? 'bg-rose-600' : 'bg-slate-600'}`} onClick={() => setMode('paint')}>＋ 範囲を追加</button>
+              <button aria-pressed={mode === 'erase'} className={`rounded px-3 py-2 ${mode === 'erase' ? 'bg-rose-600' : 'bg-slate-600'}`} onClick={() => setMode('erase')}>－ 範囲を除外</button>
+              <label className="flex items-center gap-2 text-sm">太さ <input aria-label="ブラシの太さ" type="range" min="8" max="100" value={brush} onChange={(e) => setBrush(Number(e.target.value))} /></label>
+              <button className="rounded bg-slate-600 px-3 py-2" onClick={() => {
+                retouchMaskRef.current.getContext('2d').clearRect(0, 0, retouchMaskRef.current.width, retouchMaskRef.current.height);
+                setVersion((v) => v + 1);
+              }}>選択を消去</button>
+            </div>
+            <textarea className="w-full rounded bg-slate-700 p-2 text-sm" rows={2}
+              placeholder="例: 体とマットが実際に接地するように、影も含めて自然に直してください"
+              value={retouchPrompt} onChange={(e) => setRetouchPrompt(e.target.value)} />
+            <div className="flex flex-wrap gap-2 border-t border-slate-600 pt-3">
+              <button disabled={busy} className="rounded bg-blue-600 px-4 py-2 font-medium disabled:opacity-50" onClick={retouchRun}>{busy ? '生成中…' : 'この内容で生成'}</button>
+              {busy && <button className="rounded bg-slate-600 px-4 py-2" onClick={() => abortRef.current?.abort()}>処理を中止</button>}
+              <button disabled={busy} className="rounded bg-slate-600 px-4 py-2 disabled:opacity-50" onClick={retouchClose}>やめる</button>
+            </div>
+          </>}
+          {hasRetouchPreview && <div className="flex flex-wrap gap-2 border-t border-slate-600 pt-3">
+            <button className="rounded bg-green-700 px-4 py-2" onClick={retouchAccept}>この結果を採用</button>
+            <button className="rounded bg-slate-600 px-4 py-2" onClick={retouchRevise}>やり直す</button>
+            <button className="rounded bg-slate-600 px-4 py-2" onClick={() => download(retouchPreviewRef.current, 'banzai_retouch_preview.png')}>途中画像を保存</button>
+          </div>}
+        </div>}
+        {stage === 'done' && !finishing && !retouching && <div className="flex flex-wrap gap-2 rounded-xl bg-slate-800 p-4">
           <button className="rounded bg-green-700 px-4 py-2" onClick={() => download(workingRef.current, 'banzai_result.png')}>完成画像を保存</button>
           <button className="rounded bg-amber-700 px-4 py-2" onClick={() => setFinishing(true)}>仕上がりを微調整</button>
+          <button className="rounded bg-amber-700 px-4 py-2" onClick={retouchStart}>気になる箇所を直す</button>
           {!advanced && <button className="rounded bg-blue-700 px-4 py-2" onClick={() => runAutomatic(originalRef.current)}>同じ原画像でもう一度</button>}
           {!advanced && <button className="rounded bg-slate-600 px-4 py-2" onClick={openAdvanced}>詳細調整</button>}
           {advanced && <button className="rounded bg-slate-600 px-4 py-2" onClick={closeAdvanced}>調整を終了して通常画面へ</button>}
