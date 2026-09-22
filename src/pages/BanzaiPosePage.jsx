@@ -3,8 +3,8 @@ import { useApiKeys } from '../context/ApiKeyContext.jsx';
 import { useWkAutoLoad } from '../hooks/useWkAutoLoad.js';
 import {
   analyzePoseWithProvider, composeSelected, copyCanvas, createAutomaticPlan, editWithProvider,
-  estimateBanzaiTargets, makePoseGuide, makeCanvas, maskHasPaint, restoreOccluder, selectedChangeRatio,
-  verifyArmsRendered,
+  estimateBanzaiTargets, makePoseGuide, makeCanvas, maskHasPaint, paintOldArmRegion, restoreOccluder,
+  selectedChangeRatio, verifyArmsRendered,
 } from '../lib/banzaiPipeline.js';
 
 const LANDMARKS = ['head', 'torso', 'leftShoulder', 'rightShoulder'];
@@ -316,6 +316,7 @@ export default function BanzaiPosePage() {
     ctx.save(); ctx.strokeStyle = 'rgba(255, 60, 80, 1)'; ctx.fillStyle = 'rgba(255, 60, 80, 1)'; ctx.lineWidth = width; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
     oldCtx.save(); oldCtx.strokeStyle = 'rgba(255, 60, 80, 1)'; oldCtx.fillStyle = 'rgba(255, 60, 80, 1)'; oldCtx.lineWidth = oldRegionWidth; oldCtx.lineCap = 'round'; oldCtx.lineJoin = 'round';
     const joints = autoPlanRef.current?.joints;
+    const visibleArmPolygons = autoPlanRef.current?.visibleArmPolygons;
     for (const [side, hand] of [['left', targets.leftHand], ['right', targets.rightHand]]) {
       const shoulder = landmarks[`${side}Shoulder`];
       // Also cover the original elbow/wrist path (and a buffer around the
@@ -330,8 +331,13 @@ export default function BanzaiPosePage() {
       if (elbow && wrist) {
         ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(elbow.x, elbow.y); ctx.lineTo(wrist.x, wrist.y); ctx.stroke();
         ctx.beginPath(); ctx.arc(wrist.x, wrist.y, width * 1.1, 0, Math.PI * 2); ctx.fill();
-        oldCtx.beginPath(); oldCtx.moveTo(shoulder.x, shoulder.y); oldCtx.lineTo(elbow.x, elbow.y); oldCtx.lineTo(wrist.x, wrist.y); oldCtx.stroke();
-        oldCtx.beginPath(); oldCtx.arc(wrist.x, wrist.y, oldWristRadius, 0, Math.PI * 2); oldCtx.fill();
+        // Reuse the same AI-traced visible-arm outline the automatic plan
+        // used, rather than falling back to the shoulder-elbow-wrist
+        // geometry: it follows this photo's actual arm silhouette and stays
+        // valid even though shoulder/hand were moved manually here, since it
+        // was traced straight from the original pixels, not derived from
+        // these points.
+        paintOldArmRegion(oldCtx, { polygon: visibleArmPolygons?.[side], shoulder, elbow, wrist, oldWristRadius });
       }
       ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(hand.x, hand.y); ctx.stroke();
       // The corridor's round cap at the target is only as wide as the
