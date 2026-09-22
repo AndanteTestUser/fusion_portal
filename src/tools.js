@@ -24,4 +24,11 @@ export const tools = [
     description: '構図を解析し、元画像と比較しながらスタイル変換します。',
     component: lazy(() => import('./pages/GeminiCanvasPage.jsx')),
   },
+  {
+    path: '/proportion-repair',
+    title: '頭身補正・描画修復',
+    icon: '📐',
+    description: '縦伸長で頭身を手調整し、元比率へ戻して編集痕だけを修復します。',
+    component: lazy(() => import('./pages/ProportionRepairPage.jsx')),
+  },
 ];
