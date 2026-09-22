@@ -188,10 +188,15 @@ export default function BanzaiPosePage() {
       });
       let result = composeSelected(base, generated, plan.arms);
       if (selectedChangeRatio(base, result, plan.arms) < 0.005) throw new Error('両腕の変化を確認できませんでした');
+      result = restoreOccluder(result, image, plan.occluder, plan.armsOldRegion);
+      // Verify the actual final image the user will see (after occluder
+      // restore), not the pre-restore intermediate: restoreOccluder is
+      // exactly the step that has repeatedly reintroduced or erased arm
+      // pixels in this pipeline's history, so a check that only looks at the
+      // arm-generation step's own output would miss damage done afterward.
       setMessage('生成された両腕を確認しています…');
       const armCheck = await verifyArmsRendered({ provider, key, image: result, signal: controller.signal });
       if (!armCheck.ok) throw new Error(`両腕が正しく生成されませんでした: ${armCheck.reason}`);
-      result = restoreOccluder(result, image, plan.occluder, plan.armsOldRegion);
       workingRef.current = result;
       pendingRef.current = null;
       setStage('done'); setMessage('自動処理が完了しました。前面の遮蔽物は原画像から同じ位置へ復元済みです。');
@@ -377,14 +382,11 @@ export default function BanzaiPosePage() {
         pendingRef.current = null;
         throw new Error('指定範囲の変化が確認できません。範囲を見直して再実行してください');
       }
-      if (stage === 'arms') {
-        setMessage('生成された両腕を確認しています…');
-        const armCheck = await verifyArmsRendered({ provider, key, image: pendingRef.current, signal: controller.signal });
-        if (!armCheck.ok) {
-          pendingRef.current = null;
-          throw new Error(`両腕が正しく生成されませんでした: ${armCheck.reason}`);
-        }
-      }
+      // The arm-render check runs once, in accept(), against the actual
+      // final image after restoreOccluder — not here too. Checking the
+      // pre-restore preview as well would cost a second AI call on every
+      // successful run without adding coverage, since restoreOccluder can
+      // still break a preview that passed this check.
       setPreview(true);
       setMessage('プレビューを確認してください。問題があれば編集範囲を直して同じ工程を再実行できます。');
       setVersion((v) => v + 1);
@@ -393,15 +395,34 @@ export default function BanzaiPosePage() {
     } finally { setBusy(false); abortRef.current = null; }
   };
 
-  const accept = () => {
+  const accept = async () => {
     if (!pendingRef.current) return;
     if (stage === 'occluder') {
       workingRef.current = pendingRef.current; pendingRef.current = null; moveToArms();
-    } else {
-      workingRef.current = restoreOccluder(pendingRef.current, originalRef.current, occluderRef.current, armsOldRegionRef.current);
+      return;
+    }
+    const restored = restoreOccluder(pendingRef.current, originalRef.current, occluderRef.current, armsOldRegionRef.current);
+    // restoreOccluder is exactly the step that has repeatedly reintroduced or
+    // erased arm pixels in this pipeline's history (shoulder-swallowed
+    // hands, leaked pre-edit arms). The run() step's own arm check only saw
+    // the pre-restore preview, so verify again here against the actual final
+    // image before ever calling it done.
+    const key = entries[provider]?.apiKey;
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setBusy(true);
+    setMessage('復元後の仕上がりを確認しています…');
+    try {
+      const armCheck = await verifyArmsRendered({ provider, key, image: restored, signal: controller.signal });
+      if (!armCheck.ok) throw new Error(`遮蔽物の復元後に両腕を確認できませんでした: ${armCheck.reason}`);
+      workingRef.current = restored;
       pendingRef.current = null; setPreview(false); setStage('done');
       setMessage('前面の遮蔽物を元座標に復元しました。仕上がりを確認して保存してください。');
       setVersion((v) => v + 1);
+    } catch (error) {
+      setMessage(error.name === 'AbortError' ? '処理を中止しました。' : `復元後の確認に失敗しました: ${error.message} 範囲を見直して再実行してください。`);
+    } finally {
+      setBusy(false); abortRef.current = null;
     }
   };
 
@@ -575,9 +596,9 @@ export default function BanzaiPosePage() {
           <button className="rounded bg-slate-600 px-4 py-2" onClick={openAdvanced}>詳細調整を開く</button>
         </div>}
         {advanced && preview && <div className="flex flex-wrap gap-2 rounded-xl bg-slate-800 p-4">
-          <button className="rounded bg-green-700 px-4 py-2" onClick={accept}>{stage === 'occluder' ? '確認して両腕の工程へ' : '確認して遮蔽物を復元'}</button>
-          <button className="rounded bg-slate-600 px-4 py-2" onClick={revise}>範囲を修正して再実行</button>
-          <button className="rounded bg-slate-600 px-4 py-2" onClick={() => download(pendingRef.current, `banzai_${stage}_preview.png`)}>途中画像を保存</button>
+          <button disabled={busy} className="rounded bg-green-700 px-4 py-2 disabled:opacity-50" onClick={accept}>{busy ? '確認中…' : stage === 'occluder' ? '確認して両腕の工程へ' : '確認して遮蔽物を復元'}</button>
+          <button disabled={busy} className="rounded bg-slate-600 px-4 py-2 disabled:opacity-50" onClick={revise}>範囲を修正して再実行</button>
+          <button disabled={busy} className="rounded bg-slate-600 px-4 py-2 disabled:opacity-50" onClick={() => download(pendingRef.current, `banzai_${stage}_preview.png`)}>途中画像を保存</button>
         </div>}
         {stage === 'done' && <div className="flex flex-wrap gap-2 rounded-xl bg-slate-800 p-4">
           <button className="rounded bg-green-700 px-4 py-2" onClick={() => download(workingRef.current, 'banzai_result.png')}>完成画像を保存</button>
