@@ -4,7 +4,7 @@ import { useWkAutoLoad } from '../hooks/useWkAutoLoad.js';
 import {
   analyzePoseWithProvider, composeSelected, copyCanvas, createAutomaticPlan, editWithProvider,
   estimateBanzaiTargets, makePoseGuide, makeCanvas, maskHasPaint, restoreOccluder,
-  selectedChangeRatio, subtractMask, verifyArmsRendered,
+  selectedChangeRatio, verifyArmsRendered,
 } from '../lib/banzaiPipeline.js';
 
 const LANDMARKS = ['head', 'torso', 'leftShoulder', 'rightShoulder'];
@@ -70,6 +70,12 @@ export default function BanzaiPosePage() {
   const workingRef = useRef(null);
   const pendingRef = useRef(null);
   const occluderRef = useRef(null);
+  // The tight, undilated occluder mask actually used for restoration — see
+  // banzaiPipeline.js's createAutomaticPlan/restoreOccluder comments. Kept
+  // in lockstep with occluderRef: any manual brush stroke on the occluder
+  // mask has no "dilated vs tight" distinction to begin with (it's the
+  // user's own explicit selection), so it's mirrored into both directly.
+  const occluderCoreRef = useRef(null);
   const armsRef = useRef(null);
   const canvasRef = useRef(null);
   const pointerRef = useRef(null);
@@ -150,7 +156,10 @@ export default function BanzaiPosePage() {
         };
         // Don't clobber a mask the user has already started correcting by
         // hand while the analysis was still running.
-        if (!manualTouchedRef.current.occluder) occluderRef.current = merge(occluderRef.current, plan.occluder);
+        if (!manualTouchedRef.current.occluder) {
+          occluderRef.current = merge(occluderRef.current, plan.occluder);
+          occluderCoreRef.current = merge(occluderCoreRef.current, plan.occluderCore);
+        }
         if (!manualTouchedRef.current.arms) armsRef.current = merge(armsRef.current, plan.arms);
         if (advancedReturnRef.current?.stage === 'analyzing') {
           advancedReturnRef.current = {
@@ -164,7 +173,7 @@ export default function BanzaiPosePage() {
         return;
       }
       setLandmarks(plan.landmarks); setHandOverrides(plan.targets);
-      occluderRef.current = plan.occluder; armsRef.current = plan.arms;
+      occluderRef.current = plan.occluder; occluderCoreRef.current = plan.occluderCore; armsRef.current = plan.arms;
       let base = copyCanvas(image);
 
       if (maskHasPaint(plan.occluder)) {
@@ -184,7 +193,7 @@ export default function BanzaiPosePage() {
       });
       let result = composeSelected(base, generated, plan.arms);
       if (selectedChangeRatio(base, result, plan.arms) < 0.005) throw new Error('両腕の変化を確認できませんでした');
-      result = restoreOccluder(result, image, plan.occluder);
+      result = restoreOccluder(result, image, plan.occluderCore);
       // Verify the actual final image the user will see (after occluder
       // restore), not the pre-restore intermediate: restoreOccluder is
       // exactly the step that has repeatedly reintroduced or erased arm
@@ -218,6 +227,7 @@ export default function BanzaiPosePage() {
     originalRef.current = image;
     workingRef.current = copyCanvas(image);
     occluderRef.current = makeCanvas(image.width, image.height);
+    occluderCoreRef.current = makeCanvas(image.width, image.height);
     armsRef.current = makeCanvas(image.width, image.height);
     pendingRef.current = null;
     autoPlanRef.current = null;
@@ -257,8 +267,7 @@ export default function BanzaiPosePage() {
     };
   };
 
-  const stroke = (from, to) => {
-    const mask = stage === 'occluder' ? occluderRef.current : armsRef.current;
+  const paintStroke = (mask, from, to) => {
     const ctx = mask.getContext('2d');
     ctx.save();
     ctx.globalCompositeOperation = mode === 'erase' ? 'destination-out' : 'source-over';
@@ -269,6 +278,18 @@ export default function BanzaiPosePage() {
     ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.lineTo(to.x, to.y); ctx.stroke();
     ctx.beginPath(); ctx.arc(to.x, to.y, ctx.lineWidth / 2, 0, Math.PI * 2); ctx.fill();
     ctx.restore();
+  };
+
+  const stroke = (from, to) => {
+    if (stage === 'occluder') {
+      // A manual brush stroke is the user's own explicit selection, with no
+      // "dilated vs tight" distinction to preserve — apply it identically
+      // to both the removal mask and the restore-time core mask.
+      paintStroke(occluderRef.current, from, to);
+      paintStroke(occluderCoreRef.current, from, to);
+    } else {
+      paintStroke(armsRef.current, from, to);
+    }
     manualTouchedRef.current[stage === 'occluder' ? 'occluder' : 'arms'] = true;
     setVersion((v) => v + 1);
   };
@@ -317,11 +338,11 @@ export default function BanzaiPosePage() {
       ctx.beginPath(); ctx.arc(hand.x, hand.y, width * 1.1, 0, Math.PI * 2); ctx.fill();
     }
     ctx.restore();
-    // The occluder must always end up as the frontmost layer of the final
-    // composite (see banzaiPipeline.js's restoreOccluder comment): carve it
-    // back out of this freshly-drawn corridor so a manual update never
-    // reopens edit-mask territory the automatic plan had already excluded.
-    armsRef.current = subtractMask(mask, occluderRef.current);
+    // The arm edit mask is never carved around the occluder here (or
+    // anywhere it's built) — see banzaiPipeline.js's createAutomaticPlan
+    // comment. Doing so fragments the mask handed to the arm-editing AI
+    // call and degrades the generation itself; whatever the occluder needs
+    // is handled entirely inside restoreOccluder, at the restore step.
     setMessage('肩から目標方向までの編集範囲を自動設定しました。通常はこのまま生成できます。');
     setVersion((v) => v + 1);
   };
@@ -395,7 +416,7 @@ export default function BanzaiPosePage() {
       workingRef.current = pendingRef.current; pendingRef.current = null; moveToArms();
       return;
     }
-    const restored = restoreOccluder(pendingRef.current, originalRef.current, occluderRef.current);
+    const restored = restoreOccluder(pendingRef.current, originalRef.current, occluderCoreRef.current);
     // restoreOccluder is exactly the step that has repeatedly reintroduced or
     // erased arm pixels in this pipeline's history (shoulder-swallowed
     // hands, leaked pre-edit arms). The run() step's own arm check only saw
@@ -448,6 +469,7 @@ export default function BanzaiPosePage() {
     if (draft) {
       workingRef.current = copyCanvas(draft.image);
       occluderRef.current = copyCanvas(draft.occluder);
+      occluderCoreRef.current = copyCanvas(draft.occluderCore);
       armsRef.current = copyCanvas(draft.arms);
       pendingRef.current = draft.pending ? copyCanvas(draft.pending) : null;
       setLandmarks(draft.landmarks);
@@ -459,6 +481,7 @@ export default function BanzaiPosePage() {
       const plan = autoPlanRef.current;
       workingRef.current = copyCanvas(image);
       occluderRef.current = plan ? copyCanvas(plan.occluder) : makeCanvas(image.width, image.height);
+      occluderCoreRef.current = plan ? copyCanvas(plan.occluderCore) : makeCanvas(image.width, image.height);
       armsRef.current = plan ? copyCanvas(plan.arms) : makeCanvas(image.width, image.height);
       pendingRef.current = null;
       setLandmarks(plan?.landmarks || {});
@@ -487,6 +510,7 @@ export default function BanzaiPosePage() {
       advancedDraftRef.current = {
         image: copyCanvas(workingRef.current),
         occluder: copyCanvas(occluderRef.current),
+        occluderCore: copyCanvas(occluderCoreRef.current),
         arms: copyCanvas(armsRef.current),
         pending: pendingRef.current ? copyCanvas(pendingRef.current) : null,
         landmarks: { ...landmarks },
@@ -583,7 +607,11 @@ export default function BanzaiPosePage() {
               <button aria-pressed={mode === 'paint'} className={`rounded px-3 py-2 ${mode === 'paint' ? 'bg-rose-600' : 'bg-slate-600'}`} onClick={() => { setMode('paint'); setPointMode(null); }}>＋ 範囲を追加</button>
               <button aria-pressed={mode === 'erase'} className={`rounded px-3 py-2 ${mode === 'erase' ? 'bg-rose-600' : 'bg-slate-600'}`} onClick={() => { setMode('erase'); setPointMode(null); }}>－ 範囲を除外</button>
               <label className="flex items-center gap-2 text-sm">太さ <input aria-label="ブラシの太さ" type="range" min="8" max="100" value={brush} onChange={(e) => setBrush(Number(e.target.value))} /></label>
-              <button className="rounded bg-slate-600 px-3 py-2" onClick={() => { activeMask.getContext('2d').clearRect(0, 0, activeMask.width, activeMask.height); setVersion((v) => v + 1); }}>補正範囲を消去</button>
+              <button className="rounded bg-slate-600 px-3 py-2" onClick={() => {
+                activeMask.getContext('2d').clearRect(0, 0, activeMask.width, activeMask.height);
+                if (stage === 'occluder') occluderCoreRef.current.getContext('2d').clearRect(0, 0, occluderCoreRef.current.width, occluderCoreRef.current.height);
+                setVersion((v) => v + 1);
+              }}>補正範囲を消去</button>
             </div>
           </details>
           <div className="flex flex-wrap gap-2 border-t border-slate-600 pt-3">

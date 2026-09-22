@@ -90,16 +90,21 @@ export function subtractMask(base, subtract) {
 export function restoreOccluder(edited, original, occluderMask) {
   // Pixel-for-pixel restoration of the front layer in its original
   // coordinates, unconditionally, with no exclusion. The occluder must
-  // always end up as the frontmost layer, full stop — this used to be
-  // undermined by excluding a region estimated to be "where the old arm
-  // was" (first geometric, later AI-traced), which sometimes overlapped
-  // genuine occluder content (a foreground subject's leg) and silently
-  // dropped it from restoration. The old arm can safely be ignored entirely
-  // here because createAutomaticPlan already carves the occluder out of the
-  // arm edit mask before any editing happens: the arm edit is never even
-  // asked to touch occluder territory, so there is no "old arm" content of
-  // any kind — ghost or otherwise — for this function to ever have to guard
-  // against.
+  // always end up as the frontmost layer, full stop.
+  //
+  // occluderMask here must be the TIGHT, undilated polygon (createAutomaticPlan's
+  // occluderCore), never the dilated occluder mask used for the removal
+  // edit. This function does no exclusion of its own — no estimate of
+  // "where the old arm was," geometric or AI-traced, in any form — because
+  // every attempt at that estimate caused its own regression (leg erasure,
+  // then broken arm generation once the exclusion was moved upstream into
+  // the arm edit mask instead). Restoring only the tight polygon sidesteps
+  // the problem entirely: it is never the subject's own arm by construction
+  // (the analysis prompt excludes the subject's own body from it), so
+  // restoring it can never ghost the old arm back in, with nothing to tune
+  // per photo. The cost is a possible thin, un-restored rim right at the
+  // occluder's edge if the AI's trace slightly under-shoots the real
+  // boundary — a soft-edge imperfection, not a structural failure.
   return composeSelected(edited, original, occluderMask);
 }
 
@@ -392,42 +397,61 @@ export function createAutomaticPlan(image, analysis) {
     // mask boundary and only the sleeve survives the final composite.
     armCtx.beginPath(); armCtx.arc(targets[`${side}Hand`].x, targets[`${side}Hand`].y, handRadius, 0, Math.PI * 2); armCtx.fill();
   }
+  // Two occluder masks, both traced from the same AI polygons, used for two
+  // different purposes:
+  //
+  // `occluder` (dilated) is for the occluder-REMOVAL edit only (step 1: ask
+  // the image AI to erase the foreground subject and reconstruct what's
+  // behind them). Dilating it there is safe and desirable — erring toward
+  // over-erasing avoids leaving thin hair/clothing fragments of the removed
+  // subject behind in the reconstructed base image.
+  //
+  // `occluderCore` (undilated — fill only, no stroke) is for RESTORATION
+  // (step 3, restoreOccluder). It is used unconditionally, with no
+  // exclusion logic and no concept of "where the old arm was" anywhere —
+  // every past attempt to protect against the old arm ghosting back in via
+  // some estimate of its position caused a worse regression (leg erasure,
+  // then broken arm generation). Restoring only the tight, AI-confirmed
+  // polygon sidesteps the problem entirely: that polygon is never the
+  // subject's own arm by construction (the analysis prompt explicitly
+  // excludes the subject's own body), so restoring it can never bring back
+  // an old-arm ghost, full stop — no estimate, no exclusion, nothing to
+  // tune per photo.
+  //
+  // The trade-off: `occluder`'s dilation margin (the safety buffer beyond
+  // this tight polygon) is no longer restored with real occluder pixels at
+  // all. If the AI's polygon under-traces the occluder's true boundary
+  // (e.g. flyaway hair), a thin rim right at the edge may show whatever the
+  // arm edit or background reconstruction left there instead of the real
+  // occluder. That's a soft-edge cosmetic imperfection, not a structural
+  // failure like a missing leg, a disconnected arm, or a ghosted old one.
   const occluder = makeCanvas(image.width, image.height);
   const occCtx = occluder.getContext('2d');
   occCtx.fillStyle = 'rgba(255,60,80,1)';
   occCtx.strokeStyle = 'rgba(255,60,80,1)';
-  // Reverted: shrinking this (0.05 -> 0.02) to stop the mask reaching a
-  // nearby new hand target was confirmed, in review, to not even fix that
-  // case (the arm-render check still flagged the same missing hand), while
-  // it did reopen the original problem this width was chosen to prevent —
-  // a real occluder subject's feet, under-traced at the polygon boundary by
-  // the vision model, were left without enough buffer to be restored, so
-  // the front subject's legs visibly ended with no feet in the final
-  // composite. Back to the wider value; the new-hand-target conflict is a
-  // separate problem this dilation was never the right lever for (see the
-  // warn-not-block handling in the UI instead).
   occCtx.lineWidth = Math.max(14, Math.min(image.width, image.height) * 0.05);
   occCtx.lineJoin = 'round';
+  const occluderCore = makeCanvas(image.width, image.height);
+  const occCoreCtx = occluderCore.getContext('2d');
+  occCoreCtx.fillStyle = 'rgba(255,60,80,1)';
   for (const item of analysis.occluders || []) {
     const polygon = item.polygon.map((point) => fromNormalized(point, image));
     if (polygon.length < 3) continue;
     occCtx.beginPath(); occCtx.moveTo(polygon[0].x, polygon[0].y);
-    for (const point of polygon.slice(1)) occCtx.lineTo(point.x, point.y);
-    // The analysis polygon is intentionally expanded at its boundary so that
-    // hair, clothing edges and shadows are not left behind as fragments.
+    occCoreCtx.beginPath(); occCoreCtx.moveTo(polygon[0].x, polygon[0].y);
+    for (const point of polygon.slice(1)) { occCtx.lineTo(point.x, point.y); occCoreCtx.lineTo(point.x, point.y); }
     occCtx.closePath(); occCtx.fill(); occCtx.stroke();
+    occCoreCtx.closePath(); occCoreCtx.fill();
   }
-  // The occluder must always end up as the frontmost layer of the final
-  // composite, with nothing else ever allowed to sit in front of it —
-  // including the blank/background space the arm edit leaves behind at the
-  // old arm's original position. Carving the occluder out of the arm edit
-  // mask here, before any editing happens, is what guarantees that: the arm
-  // edit is never even asked to touch occluder territory, so there is no
-  // "old arm's empty space" for it to leave behind there in the first place,
-  // and restoreOccluder can safely restore the occluder unconditionally
-  // afterward with no exclusion logic of its own needed.
-  const armsFinal = subtractMask(arms, occluder);
-  return { landmarks, targets, joints, arms: armsFinal, occluder, confidence: analysis.confidence, summary: analysis.summary };
+  // The arm edit mask is never touched by the occluder, here or anywhere
+  // else it's built. Carving the occluder out of it was tried and reverted:
+  // it fragmented the mask handed to the arm-editing AI call, degrading or
+  // breaking the arm generation itself (visible at the "腕の方向" stage,
+  // before restoreOccluder ever runs) — an effect that has no business
+  // happening outside the restore step ("確認・反映"). Whatever the
+  // occluder needs is handled entirely inside restoreOccluder, via
+  // occluderCore above, never by altering this mask.
+  return { landmarks, targets, joints, arms, occluder, occluderCore, confidence: analysis.confidence, summary: analysis.summary };
 }
 
 async function responseError(response) {
