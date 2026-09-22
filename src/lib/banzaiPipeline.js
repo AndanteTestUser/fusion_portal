@@ -427,13 +427,18 @@ export function createAutomaticPlan(image, analysis) {
   const occCtx = occluder.getContext('2d');
   occCtx.fillStyle = 'rgba(255,60,80,1)';
   occCtx.strokeStyle = 'rgba(255,60,80,1)';
-  // Widened from 0.035/10 (see fix history): thin structures like fingers
-  // gripping the subject are easy for the vision model to under-trace, and
-  // any sliver missed here is never restored, leaking the untouched original
-  // pixel straight through to the final composite as a disconnected
-  // fragment. This only grows the "restore from the original photo" zone, so
-  // making it more generous is low-risk.
-  occCtx.lineWidth = Math.max(14, Math.min(image.width, image.height) * 0.05);
+  // This dilates the occluder boundary outward on every side by roughly
+  // half of this width, regardless of how close the polygon happens to sit
+  // to the new banzai hand target elsewhere in the mask math. An earlier,
+  // wider value (0.05, up from 0.035) was chosen only to stop thin
+  // under-traced structures like gripping fingers from leaking a sliver of
+  // untouched original through as a disconnected fragment — but that same
+  // growth was confirmed, in review, to also reach far enough to cover a
+  // nearby new hand target that the untouched polygon would have cleared,
+  // so "more generous is low-risk" was wrong: a false-looking "hand hidden
+  // by the occluder" is a worse failure than an occasional thin boundary
+  // sliver. Smaller again, closer to the original value.
+  occCtx.lineWidth = Math.max(8, Math.min(image.width, image.height) * 0.02);
   occCtx.lineJoin = 'round';
   for (const item of analysis.occluders || []) {
     const polygon = item.polygon.map((point) => fromNormalized(point, image));
