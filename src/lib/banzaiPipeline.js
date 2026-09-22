@@ -87,27 +87,20 @@ export function subtractMask(base, subtract) {
   return result;
 }
 
-export function restoreOccluder(edited, original, occluderMask, protectedMask) {
+export function restoreOccluder(edited, original, occluderMask) {
   // Pixel-for-pixel restoration of the front layer in its original
-  // coordinates, except wherever protectedMask overlaps it.
-  //
-  // protectedMask must be only the ORIGINAL arm's own path (shoulder to the
-  // pre-edit elbow/wrist), never the new banzai target's reach corridor. The
-  // occluder polygon is deliberately expanded to fully cover a foreground
-  // subject, including where their hand grips the original arm, so it
-  // routinely overlaps that original path; restoring there would paste back
-  // the pre-edit bent arm right where the new one now is. But the new
-  // target's corridor points wherever the pose direction happens to aim
-  // (often straight through the same foreground subject's torso on its way
-  // past their head) with no physical relationship to the occluder at all;
-  // excluding overlap with it would delete or fragment a real, unrelated
-  // occluder instead of the finalized arm ever being at risk there. Wherever
-  // a foreground subject's original position truly does cover the new arm on
-  // screen, restoring them in full is the physically correct result (they
-  // were in front; the new arm passes behind them), not a bug to guard
+  // coordinates, unconditionally, with no exclusion. The occluder must
+  // always end up as the frontmost layer, full stop — this used to be
+  // undermined by excluding a region estimated to be "where the old arm
+  // was" (first geometric, later AI-traced), which sometimes overlapped
+  // genuine occluder content (a foreground subject's leg) and silently
+  // dropped it from restoration. The old arm can safely be ignored entirely
+  // here because createAutomaticPlan already carves the occluder out of the
+  // arm edit mask before any editing happens: the arm edit is never even
+  // asked to touch occluder territory, so there is no "old arm" content of
+  // any kind — ghost or otherwise — for this function to ever have to guard
   // against.
-  const mask = protectedMask ? subtractMask(occluderMask, protectedMask) : occluderMask;
-  return composeSelected(edited, original, mask);
+  return composeSelected(edited, original, occluderMask);
 }
 
 export function estimateBanzaiTargets({ head, leftShoulder, rightShoulder, torso }) {
@@ -184,22 +177,8 @@ const POSE_SCHEMA = {
         required: ['description', 'polygon'],
       },
     },
-    // The currently-visible outline of each of the subject's own arms, traced
-    // directly from the photo instead of guessed from the 3 joint points. See
-    // armsOldRegion below: a decreed geometric shape (stroke+circles through
-    // shoulder/elbow/wrist) drifts from the real arm whenever those estimated
-    // joints are off, or whenever the true arm silhouette bulges past a
-    // straight line (loose sleeve, bent wrist). Tracing the actual boundary
-    // like an occluder polygon removes that dependency on joint accuracy.
-    visibleArms: {
-      type: 'array', items: {
-        type: 'object', additionalProperties: false,
-        properties: { side: { type: 'string', enum: ['left', 'right'] }, polygon: { type: 'array', items: POINT_SCHEMA } },
-        required: ['side', 'polygon'],
-      },
-    },
   },
-  required: ['found', 'confidence', 'summary', 'head', 'torso', 'leftShoulder', 'rightShoulder', 'leftElbow', 'rightElbow', 'leftWrist', 'rightWrist', 'occluders', 'visibleArms'],
+  required: ['found', 'confidence', 'summary', 'head', 'torso', 'leftShoulder', 'rightShoulder', 'leftElbow', 'rightElbow', 'leftWrist', 'rightWrist', 'occluders'],
 };
 
 function normalizePose(value) {
@@ -214,10 +193,6 @@ function normalizePose(value) {
       description: String(item?.description || ''),
       polygon: Array.isArray(item?.polygon) ? item.polygon.map(point) : [],
     })).filter((item) => item.polygon.length >= 3) : [],
-    visibleArms: Array.isArray(value.visibleArms) ? value.visibleArms.map((item) => ({
-      side: item?.side === 'left' || item?.side === 'right' ? item.side : null,
-      polygon: Array.isArray(item?.polygon) ? item.polygon.map(point) : [],
-    })).filter((item) => item.side && item.polygon.length >= 3) : [],
   };
   for (const name of ['head', 'torso', 'leftShoulder', 'rightShoulder', 'leftElbow', 'rightElbow', 'leftWrist', 'rightWrist']) normalized[name] = point(value[name]);
   return normalized;
@@ -267,7 +242,7 @@ async function providerFetch(url, options, label) {
 
 export async function analyzePoseWithProvider({ provider, key, image, signal }) {
   if (!key) throw new Error(`${provider === 'openai' ? 'OpenAI' : 'Gemini'}のAPIキーを設定してください`);
-  const instruction = `Analyze the main reclining or lying person whose arms should be changed to a fully extended overhead banzai pose. Return coordinates normalized from 0 to 1000 relative to the full image. Estimate hidden joints. left/right mean the person's anatomical sides. Identify only foreground people or objects covering this subject or either arm path as occluders, tracing each visible boundary with a tight polygon of 6 to 20 points. Never classify the subject's own body or clothes as an occluder. Separately, for each of the subject's own two arms that is at least partially visible in the CURRENT, pre-edit photo, trace its actual visible outline (shoulder through upper arm, forearm, wrist and hand/fingers, following the true silhouette rather than a straight line through the joints) as a tight polygon of 6 to 20 points in visibleArms, with side set to the matching "left" or "right" anatomical side; omit a side entirely if that arm is fully hidden behind an occluder or outside the frame. If no suitable person exists, set found=false. confidence must be 0 to 1.`;
+  const instruction = `Analyze the main reclining or lying person whose arms should be changed to a fully extended overhead banzai pose. Return coordinates normalized from 0 to 1000 relative to the full image. Estimate hidden joints. left/right mean the person's anatomical sides. Identify only foreground people or objects covering this subject or either arm path as occluders, tracing each visible boundary with a tight polygon of 6 to 20 points. Never classify the subject's own body or clothes as an occluder. If no suitable person exists, set found=false. confidence must be 0 to 1.`;
   // Analysis does not need edit-resolution pixels. A smaller JPEG avoids large
   // base64 request bodies that frequently fail in iOS/Safari.
   const imageDataUrl = analysisImageDataUrl(image);
@@ -381,39 +356,6 @@ function fromNormalized(point, image) {
   return { x: point.x * image.width / 1000, y: point.y * image.height / 1000 };
 }
 
-// Paints one side's armsOldRegion contribution.
-//
-// Always draws the full shoulder-elbow-wrist geometric path + wrist circle,
-// unconditionally, regardless of whether an AI-traced polygon is available —
-// this is the same baseline the pipeline used before visibleArms existed,
-// and it covers the WHOLE joint chain, not one specific joint. A per-joint
-// "use the polygon here, fall back to geometry there" branch is exactly the
-// kind of fragile, image-specific patch BANZAI_KNOWN_ISSUES.md already warns
-// against: whichever joint happens to be the one an AI polygon falls short
-// at varies photo to photo, so hand-picking one joint to hard-guarantee (as
-// an earlier version of this function did, for the shoulder specifically)
-// just moves the same ghosting bug to the next joint on the next image.
-//
-// The AI-traced polygon, when available, is layered ON TOP of that
-// unconditional baseline — pure addition, never a replacement — for the
-// extra precision a straight-line approximation can't give (actual sleeve
-// bulge, finger spread, etc.). Because it only adds coverage, it can never
-// reopen a gap the geometric baseline already closed, anywhere along the arm.
-// ctx must already have fillStyle/strokeStyle/lineWidth/lineCap/lineJoin set
-// by the caller.
-export function paintOldArmRegion(ctx, { polygon, shoulder, elbow, wrist, oldWristRadius }) {
-  ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(elbow.x, elbow.y); ctx.lineTo(wrist.x, wrist.y); ctx.stroke();
-  ctx.beginPath(); ctx.arc(wrist.x, wrist.y, oldWristRadius, 0, Math.PI * 2); ctx.fill();
-  if (polygon && polygon.length >= 3) {
-    ctx.beginPath();
-    ctx.moveTo(polygon[0].x, polygon[0].y);
-    for (const point of polygon.slice(1)) ctx.lineTo(point.x, point.y);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-  }
-}
-
 export function createAutomaticPlan(image, analysis) {
   if (!analysis?.found) throw new Error('横たわっている対象人物を自動検出できませんでした');
   const landmarks = {};
@@ -437,55 +379,12 @@ export function createAutomaticPlan(image, analysis) {
   // slightly off; a generous circle at the original wrist ensures stray
   // fingers are not left outside the mask as residual ghost fragments.
   const handRadius = armWidth * 1.1;
-  // Tracks only the pre-edit shoulder-elbow-wrist path, kept apart from the
-  // new target's reach corridor above. Occluder restoration must only ever
-  // be excluded near this original path (where a real pixel conflict with
-  // the old bent arm can occur), never near the new target, which can land
-  // anywhere the pose direction happens to point on screen with no relation
-  // to what is actually there.
-  const armsOldRegion = makeCanvas(image.width, image.height);
-  const oldCtx = armsOldRegion.getContext('2d');
-  oldCtx.strokeStyle = 'rgba(255,60,80,1)'; oldCtx.fillStyle = 'rgba(255,60,80,1)';
-  // Narrower than the edit mask's armWidth on purpose: this only needs to
-  // suppress the old arm's own pixels leaking back through restoreOccluder
-  // wherever the occluder polygon happens to graze them, not fully cover the
-  // arm for editing. Earlier this session, insetting this stroke's start
-  // away from the shoulder (to stop swallowing another subject's whole hand
-  // resting there) instead let a real, visible chunk of the pre-edit arm
-  // leak back in near the shoulder, since that area was no longer excluded
-  // at all. Keep the full shoulder-to-wrist length covered so no gap reopens
-  // near the joint, but shrink the width so it stays a thin buffer rather
-  // than a shape wide enough to swallow an unrelated adjacent hand.
-  const oldRegionWidth = armWidth * 0.4;
-  oldCtx.lineWidth = oldRegionWidth;
-  oldCtx.lineCap = 'round'; oldCtx.lineJoin = 'round';
-  // The wrist-end circle only needs to absorb AI wrist-coordinate estimation
-  // error, not act as a wide safety margin: at 1.1x this width it could span
-  // over 100px on a typical photo, reaching well past the actual hand into
-  // unrelated occluder content elsewhere in the frame (confirmed, in review,
-  // against real photo coordinates showing this circle's radius landing
-  // within the same range as the gap to a front subject's foot). Half that.
-  const oldWristRadius = oldRegionWidth * 0.5;
-  // AI-traced visible outline per side, in image pixel coordinates. Preferred
-  // over the decreed shoulder-elbow-wrist geometry below for armsOldRegion:
-  // it follows the arm's actual silhouette in this photo instead of a
-  // straight line through 3 estimated joints, so it doesn't need re-tuning
-  // per image the way the old fixed radii/widths did. Returned in the plan
-  // so manual corrections (e.g. addTargetCorridors) can reuse the same
-  // contour instead of falling back to the geometric shape.
-  const visibleArmPolygons = { left: null, right: null };
-  for (const item of analysis.visibleArms || []) {
-    if (item.side !== 'left' && item.side !== 'right') continue;
-    const polygon = item.polygon.map((point) => fromNormalized(point, image));
-    if (polygon.length >= 3) visibleArmPolygons[item.side] = polygon;
-  }
   for (const side of ['left', 'right']) {
     const shoulder = landmarks[`${side}Shoulder`];
     const elbow = joints[`${side}Elbow`];
     const wrist = joints[`${side}Wrist`];
     armCtx.beginPath(); armCtx.moveTo(shoulder.x, shoulder.y); armCtx.lineTo(elbow.x, elbow.y); armCtx.lineTo(wrist.x, wrist.y); armCtx.stroke();
     armCtx.beginPath(); armCtx.arc(wrist.x, wrist.y, handRadius, 0, Math.PI * 2); armCtx.fill();
-    paintOldArmRegion(oldCtx, { polygon: visibleArmPolygons[side], shoulder, elbow, wrist, oldWristRadius });
     armCtx.beginPath(); armCtx.moveTo(shoulder.x, shoulder.y); armCtx.lineTo(targets[`${side}Hand`].x, targets[`${side}Hand`].y); armCtx.stroke();
     // The reach corridor's stroke only gives the target endpoint a round cap
     // as wide as the forearm; a hand needs more room than that, exactly like
@@ -518,7 +417,17 @@ export function createAutomaticPlan(image, analysis) {
     // hair, clothing edges and shadows are not left behind as fragments.
     occCtx.closePath(); occCtx.fill(); occCtx.stroke();
   }
-  return { landmarks, targets, joints, arms, armsOldRegion, visibleArmPolygons, occluder, confidence: analysis.confidence, summary: analysis.summary };
+  // The occluder must always end up as the frontmost layer of the final
+  // composite, with nothing else ever allowed to sit in front of it —
+  // including the blank/background space the arm edit leaves behind at the
+  // old arm's original position. Carving the occluder out of the arm edit
+  // mask here, before any editing happens, is what guarantees that: the arm
+  // edit is never even asked to touch occluder territory, so there is no
+  // "old arm's empty space" for it to leave behind there in the first place,
+  // and restoreOccluder can safely restore the occluder unconditionally
+  // afterward with no exclusion logic of its own needed.
+  const armsFinal = subtractMask(arms, occluder);
+  return { landmarks, targets, joints, arms: armsFinal, occluder, confidence: analysis.confidence, summary: analysis.summary };
 }
 
 async function responseError(response) {

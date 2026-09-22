@@ -3,8 +3,8 @@ import { useApiKeys } from '../context/ApiKeyContext.jsx';
 import { useWkAutoLoad } from '../hooks/useWkAutoLoad.js';
 import {
   analyzePoseWithProvider, composeSelected, copyCanvas, createAutomaticPlan, editWithProvider,
-  estimateBanzaiTargets, makePoseGuide, makeCanvas, maskHasPaint, paintOldArmRegion, restoreOccluder,
-  selectedChangeRatio, verifyArmsRendered,
+  estimateBanzaiTargets, makePoseGuide, makeCanvas, maskHasPaint, restoreOccluder,
+  selectedChangeRatio, subtractMask, verifyArmsRendered,
 } from '../lib/banzaiPipeline.js';
 
 const LANDMARKS = ['head', 'torso', 'leftShoulder', 'rightShoulder'];
@@ -71,7 +71,6 @@ export default function BanzaiPosePage() {
   const pendingRef = useRef(null);
   const occluderRef = useRef(null);
   const armsRef = useRef(null);
-  const armsOldRegionRef = useRef(null);
   const canvasRef = useRef(null);
   const pointerRef = useRef(null);
   const abortRef = useRef(null);
@@ -152,10 +151,7 @@ export default function BanzaiPosePage() {
         // Don't clobber a mask the user has already started correcting by
         // hand while the analysis was still running.
         if (!manualTouchedRef.current.occluder) occluderRef.current = merge(occluderRef.current, plan.occluder);
-        if (!manualTouchedRef.current.arms) {
-          armsRef.current = merge(armsRef.current, plan.arms);
-          armsOldRegionRef.current = merge(armsOldRegionRef.current, plan.armsOldRegion);
-        }
+        if (!manualTouchedRef.current.arms) armsRef.current = merge(armsRef.current, plan.arms);
         if (advancedReturnRef.current?.stage === 'analyzing') {
           advancedReturnRef.current = {
             image: copyCanvas(image),
@@ -168,7 +164,7 @@ export default function BanzaiPosePage() {
         return;
       }
       setLandmarks(plan.landmarks); setHandOverrides(plan.targets);
-      occluderRef.current = plan.occluder; armsRef.current = plan.arms; armsOldRegionRef.current = plan.armsOldRegion;
+      occluderRef.current = plan.occluder; armsRef.current = plan.arms;
       let base = copyCanvas(image);
 
       if (maskHasPaint(plan.occluder)) {
@@ -188,7 +184,7 @@ export default function BanzaiPosePage() {
       });
       let result = composeSelected(base, generated, plan.arms);
       if (selectedChangeRatio(base, result, plan.arms) < 0.005) throw new Error('両腕の変化を確認できませんでした');
-      result = restoreOccluder(result, image, plan.occluder, plan.armsOldRegion);
+      result = restoreOccluder(result, image, plan.occluder);
       // Verify the actual final image the user will see (after occluder
       // restore), not the pre-restore intermediate: restoreOccluder is
       // exactly the step that has repeatedly reintroduced or erased arm
@@ -223,7 +219,6 @@ export default function BanzaiPosePage() {
     workingRef.current = copyCanvas(image);
     occluderRef.current = makeCanvas(image.width, image.height);
     armsRef.current = makeCanvas(image.width, image.height);
-    armsOldRegionRef.current = makeCanvas(image.width, image.height);
     pendingRef.current = null;
     autoPlanRef.current = null;
     advancedDraftRef.current = null;
@@ -300,44 +295,20 @@ export default function BanzaiPosePage() {
     if (!targets) return setMessage('頭・胴体・両肩の4点を指定してください。');
     const mask = armsRef.current;
     const ctx = mask.getContext('2d');
-    const oldCtx = armsOldRegionRef.current.getContext('2d');
     const shoulderWidth = Math.hypot(landmarks.leftShoulder.x - landmarks.rightShoulder.x, landmarks.leftShoulder.y - landmarks.rightShoulder.y);
     const width = Math.max(18, shoulderWidth * 0.38);
-    // Narrower than the edit mask's width on purpose: see banzaiPipeline.js's
-    // armsOldRegion comment. This only needs to suppress the old arm's own
-    // pixels leaking back through restoreOccluder, not fully cover the arm
-    // for editing, and covers the full shoulder-to-wrist length (unlike the
-    // edit mask) so no gap reopens near the joint.
-    const oldRegionWidth = width * 0.4;
-    // See banzaiPipeline.js's oldWristRadius comment: the wrist-end circle
-    // only needs to absorb estimation error, not act as a wide margin that
-    // can reach unrelated occluder content elsewhere in the frame.
-    const oldWristRadius = oldRegionWidth * 0.5;
     ctx.save(); ctx.strokeStyle = 'rgba(255, 60, 80, 1)'; ctx.fillStyle = 'rgba(255, 60, 80, 1)'; ctx.lineWidth = width; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-    oldCtx.save(); oldCtx.strokeStyle = 'rgba(255, 60, 80, 1)'; oldCtx.fillStyle = 'rgba(255, 60, 80, 1)'; oldCtx.lineWidth = oldRegionWidth; oldCtx.lineCap = 'round'; oldCtx.lineJoin = 'round';
     const joints = autoPlanRef.current?.joints;
-    const visibleArmPolygons = autoPlanRef.current?.visibleArmPolygons;
     for (const [side, hand] of [['left', targets.leftHand], ['right', targets.rightHand]]) {
       const shoulder = landmarks[`${side}Shoulder`];
       // Also cover the original elbow/wrist path (and a buffer around the
       // original hand) so the automatic update doesn't leave the previous
-      // arm's pixels outside the mask as residual ghost fragments. This part
-      // alone is mirrored onto armsOldRegionRef: occluder restoration must
-      // only ever be excluded near this original path, never near the new
-      // target below, which can land anywhere the pose direction points on
-      // screen with no relation to what is actually there.
+      // arm's pixels outside the mask as residual ghost fragments.
       const elbow = joints?.[`${side}Elbow`];
       const wrist = joints?.[`${side}Wrist`];
       if (elbow && wrist) {
         ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(elbow.x, elbow.y); ctx.lineTo(wrist.x, wrist.y); ctx.stroke();
         ctx.beginPath(); ctx.arc(wrist.x, wrist.y, width * 1.1, 0, Math.PI * 2); ctx.fill();
-        // Reuse the same AI-traced visible-arm outline the automatic plan
-        // used, rather than falling back to the shoulder-elbow-wrist
-        // geometry: it follows this photo's actual arm silhouette and stays
-        // valid even though shoulder/hand were moved manually here, since it
-        // was traced straight from the original pixels, not derived from
-        // these points.
-        paintOldArmRegion(oldCtx, { polygon: visibleArmPolygons?.[side], shoulder, elbow, wrist, oldWristRadius });
       }
       ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(hand.x, hand.y); ctx.stroke();
       // The corridor's round cap at the target is only as wide as the
@@ -346,7 +317,11 @@ export default function BanzaiPosePage() {
       ctx.beginPath(); ctx.arc(hand.x, hand.y, width * 1.1, 0, Math.PI * 2); ctx.fill();
     }
     ctx.restore();
-    oldCtx.restore();
+    // The occluder must always end up as the frontmost layer of the final
+    // composite (see banzaiPipeline.js's restoreOccluder comment): carve it
+    // back out of this freshly-drawn corridor so a manual update never
+    // reopens edit-mask territory the automatic plan had already excluded.
+    armsRef.current = subtractMask(mask, occluderRef.current);
     setMessage('肩から目標方向までの編集範囲を自動設定しました。通常はこのまま生成できます。');
     setVersion((v) => v + 1);
   };
@@ -420,7 +395,7 @@ export default function BanzaiPosePage() {
       workingRef.current = pendingRef.current; pendingRef.current = null; moveToArms();
       return;
     }
-    const restored = restoreOccluder(pendingRef.current, originalRef.current, occluderRef.current, armsOldRegionRef.current);
+    const restored = restoreOccluder(pendingRef.current, originalRef.current, occluderRef.current);
     // restoreOccluder is exactly the step that has repeatedly reintroduced or
     // erased arm pixels in this pipeline's history (shoulder-swallowed
     // hands, leaked pre-edit arms). The run() step's own arm check only saw
@@ -474,7 +449,6 @@ export default function BanzaiPosePage() {
       workingRef.current = copyCanvas(draft.image);
       occluderRef.current = copyCanvas(draft.occluder);
       armsRef.current = copyCanvas(draft.arms);
-      armsOldRegionRef.current = copyCanvas(draft.armsOldRegion);
       pendingRef.current = draft.pending ? copyCanvas(draft.pending) : null;
       setLandmarks(draft.landmarks);
       setHandOverrides(draft.handOverrides);
@@ -486,7 +460,6 @@ export default function BanzaiPosePage() {
       workingRef.current = copyCanvas(image);
       occluderRef.current = plan ? copyCanvas(plan.occluder) : makeCanvas(image.width, image.height);
       armsRef.current = plan ? copyCanvas(plan.arms) : makeCanvas(image.width, image.height);
-      armsOldRegionRef.current = plan ? copyCanvas(plan.armsOldRegion) : makeCanvas(image.width, image.height);
       pendingRef.current = null;
       setLandmarks(plan?.landmarks || {});
       setHandOverrides(plan?.targets || {});
@@ -515,7 +488,6 @@ export default function BanzaiPosePage() {
         image: copyCanvas(workingRef.current),
         occluder: copyCanvas(occluderRef.current),
         arms: copyCanvas(armsRef.current),
-        armsOldRegion: copyCanvas(armsOldRegionRef.current),
         pending: pendingRef.current ? copyCanvas(pendingRef.current) : null,
         landmarks: { ...landmarks },
         handOverrides: { ...handOverrides },
