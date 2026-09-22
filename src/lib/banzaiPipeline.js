@@ -408,6 +408,13 @@ export function createAutomaticPlan(image, analysis) {
   const oldRegionWidth = armWidth * 0.4;
   oldCtx.lineWidth = oldRegionWidth;
   oldCtx.lineCap = 'round'; oldCtx.lineJoin = 'round';
+  // The wrist-end circle only needs to absorb AI wrist-coordinate estimation
+  // error, not act as a wide safety margin: at 1.1x this width it could span
+  // over 100px on a typical photo, reaching well past the actual hand into
+  // unrelated occluder content elsewhere in the frame (confirmed, in review,
+  // against real photo coordinates showing this circle's radius landing
+  // within the same range as the gap to a front subject's foot). Half that.
+  const oldWristRadius = oldRegionWidth * 0.5;
   for (const side of ['left', 'right']) {
     const shoulder = landmarks[`${side}Shoulder`];
     const elbow = joints[`${side}Elbow`];
@@ -415,7 +422,7 @@ export function createAutomaticPlan(image, analysis) {
     armCtx.beginPath(); armCtx.moveTo(shoulder.x, shoulder.y); armCtx.lineTo(elbow.x, elbow.y); armCtx.lineTo(wrist.x, wrist.y); armCtx.stroke();
     armCtx.beginPath(); armCtx.arc(wrist.x, wrist.y, handRadius, 0, Math.PI * 2); armCtx.fill();
     oldCtx.beginPath(); oldCtx.moveTo(shoulder.x, shoulder.y); oldCtx.lineTo(elbow.x, elbow.y); oldCtx.lineTo(wrist.x, wrist.y); oldCtx.stroke();
-    oldCtx.beginPath(); oldCtx.arc(wrist.x, wrist.y, oldRegionWidth * 1.1, 0, Math.PI * 2); oldCtx.fill();
+    oldCtx.beginPath(); oldCtx.arc(wrist.x, wrist.y, oldWristRadius, 0, Math.PI * 2); oldCtx.fill();
     armCtx.beginPath(); armCtx.moveTo(shoulder.x, shoulder.y); armCtx.lineTo(targets[`${side}Hand`].x, targets[`${side}Hand`].y); armCtx.stroke();
     // The reach corridor's stroke only gives the target endpoint a round cap
     // as wide as the forearm; a hand needs more room than that, exactly like

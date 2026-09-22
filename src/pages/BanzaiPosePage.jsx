@@ -309,6 +309,10 @@ export default function BanzaiPosePage() {
     // for editing, and covers the full shoulder-to-wrist length (unlike the
     // edit mask) so no gap reopens near the joint.
     const oldRegionWidth = width * 0.4;
+    // See banzaiPipeline.js's oldWristRadius comment: the wrist-end circle
+    // only needs to absorb estimation error, not act as a wide margin that
+    // can reach unrelated occluder content elsewhere in the frame.
+    const oldWristRadius = oldRegionWidth * 0.5;
     ctx.save(); ctx.strokeStyle = 'rgba(255, 60, 80, 1)'; ctx.fillStyle = 'rgba(255, 60, 80, 1)'; ctx.lineWidth = width; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
     oldCtx.save(); oldCtx.strokeStyle = 'rgba(255, 60, 80, 1)'; oldCtx.fillStyle = 'rgba(255, 60, 80, 1)'; oldCtx.lineWidth = oldRegionWidth; oldCtx.lineCap = 'round'; oldCtx.lineJoin = 'round';
     const joints = autoPlanRef.current?.joints;
@@ -327,7 +331,7 @@ export default function BanzaiPosePage() {
         ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(elbow.x, elbow.y); ctx.lineTo(wrist.x, wrist.y); ctx.stroke();
         ctx.beginPath(); ctx.arc(wrist.x, wrist.y, width * 1.1, 0, Math.PI * 2); ctx.fill();
         oldCtx.beginPath(); oldCtx.moveTo(shoulder.x, shoulder.y); oldCtx.lineTo(elbow.x, elbow.y); oldCtx.lineTo(wrist.x, wrist.y); oldCtx.stroke();
-        oldCtx.beginPath(); oldCtx.arc(wrist.x, wrist.y, oldRegionWidth * 1.1, 0, Math.PI * 2); oldCtx.fill();
+        oldCtx.beginPath(); oldCtx.arc(wrist.x, wrist.y, oldWristRadius, 0, Math.PI * 2); oldCtx.fill();
       }
       ctx.beginPath(); ctx.moveTo(shoulder.x, shoulder.y); ctx.lineTo(hand.x, hand.y); ctx.stroke();
       // The corridor's round cap at the target is only as wide as the
