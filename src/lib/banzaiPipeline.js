@@ -80,28 +80,34 @@ export function selectedChangeRatio(before, after, selection) {
 }
 
 // Pure pixel-array flood fill (no canvas) so this can be unit tested. Splits
-// maskData into 4-connected components and drops any component that shares
-// even one pixel with refData. An occluder the vision model traced because
-// the subject's hand gripped or rested on it is still a single connected
-// shape reaching down to that grip point; if the grip point falls inside the
-// arm's edit corridor, the whole object is excluded rather than only the
-// pixels literally inside the corridor. Carving just the overlap left the
-// rest of a held object (the part beyond the narrow corridor/hand circle)
-// pasted back at its old position after the arm moved elsewhere for the
-// banzai pose, appearing as a piece floating with nothing holding it.
-export function excludeConnectedOverlap(width, height, maskData, refData, threshold = 16) {
+// maskData into 4-connected components. A component whose area mostly
+// coincides with refData (the arms corridor) is a small object gripped by
+// the hand itself, reaching down to that grip point as one shape: dropped
+// entirely, since carving only the overlap left the rest of it (beyond the
+// narrow corridor/hand circle) pasted back at its old position after the arm
+// moved elsewhere, appearing as a piece floating with nothing holding it. A
+// component that only grazes refData at an edge is a large, mostly
+// independent occluder (e.g. another foreground subject) that happens to
+// touch the corridor; dropping all of it purely for touching would delete an
+// unrelated object, so only its literal overlapping pixels are carved,
+// exactly as before.
+export function excludeConnectedOverlap(width, height, maskData, refData, threshold = 16, dropRatio = 0.3) {
   const size = width * height;
   const labels = new Int32Array(size).fill(-1);
-  const touchesRef = [];
+  const totalCounts = [];
+  const overlapCounts = [];
   const stack = [];
   for (let start = 0; start < size; start++) {
     if (labels[start] !== -1 || maskData[start * 4 + 3] < threshold) continue;
-    const label = touchesRef.length;
-    touchesRef.push(refData[start * 4 + 3] >= threshold);
+    const label = totalCounts.length;
+    totalCounts.push(0);
+    overlapCounts.push(0);
     labels[start] = label;
     stack.push(start);
     while (stack.length) {
       const idx = stack.pop();
+      totalCounts[label]++;
+      if (refData[idx * 4 + 3] >= threshold) overlapCounts[label]++;
       const x = idx % width;
       const y = (idx / width) | 0;
       const neighbors = [];
@@ -112,15 +118,18 @@ export function excludeConnectedOverlap(width, height, maskData, refData, thresh
       for (const next of neighbors) {
         if (labels[next] !== -1 || maskData[next * 4 + 3] < threshold) continue;
         labels[next] = label;
-        if (refData[next * 4 + 3] >= threshold) touchesRef[label] = true;
         stack.push(next);
       }
     }
   }
+  const dropWhole = totalCounts.map((total, label) => overlapCounts[label] / total > dropRatio);
   const result = new Uint8ClampedArray(maskData.length);
   for (let i = 0; i < size; i++) {
     const label = labels[i];
-    if (label === -1 || touchesRef[label]) continue;
+    if (label === -1 || dropWhole[label]) continue;
+    // Even in a kept (mostly independent) component, never restore the exact
+    // pixels the arm edit occupies, or that graze would overwrite it.
+    if (refData[i * 4 + 3] >= threshold) continue;
     const base = i * 4;
     result[base] = maskData[base];
     result[base + 1] = maskData[base + 1];
@@ -142,10 +151,12 @@ function excludeArmOverlappingOccluders(occluderMask, armsMask) {
 
 export function restoreOccluder(edited, original, occluderMask, protectedMask) {
   // Pixel-for-pixel restoration of the front layer in its original
-  // coordinates, except any occluder shape connected to protectedMask
-  // (typically the finalized arms mask/corridor): that whole shape is
-  // dropped instead of restored, since it was reaching to a hand that has
-  // since moved for the new pose.
+  // coordinates, except wherever it reaches into protectedMask (typically
+  // the finalized arms mask/corridor). A small occluder shape mostly inside
+  // that corridor is dropped whole rather than restored, since it was
+  // reaching to a hand that has since moved for the new pose; a large,
+  // mostly independent shape that only grazes the corridor keeps the rest of
+  // itself and loses just the grazed pixels.
   const mask = protectedMask ? excludeArmOverlappingOccluders(occluderMask, protectedMask) : occluderMask;
   return composeSelected(edited, original, mask);
 }
