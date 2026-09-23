@@ -578,6 +578,21 @@ export default function BanzaiPosePage() {
     setVersion((v) => v + 1);
   };
 
+  // The two "確認・反映" touch-up tools (this eraser and the free-form
+  // retouch below) each hide the other's panel while open, so the only way
+  // between them used to be closing back out to the plain done-stage
+  // buttons first. These let either panel jump straight to the other one.
+  const switchToRetouch = () => {
+    setFinishing(false);
+    retouchStart();
+  };
+
+  const switchToFinishing = () => {
+    retouchClose();
+    setFinishing(true);
+    setMessage('遮蔽物側と腕側のどちらを前面にするか、境界線をなぞって調整してください。');
+  };
+
   // A general free-form edit, unlike run()/accept() above which always send
   // one of the pipeline's own fixed prompts (occluder removal or the banzai
   // arm pose). This exists for whatever the user notices is wrong in the
@@ -615,6 +630,13 @@ export default function BanzaiPosePage() {
     workingRef.current = retouchPreviewRef.current;
     retouchPreviewRef.current = null;
     retouchMaskRef.current = makeCanvas(workingRef.current.width, workingRef.current.height);
+    // The "仕上がりを微調整" eraser recomposes from preRestoreRef on every
+    // brush stroke (restoreOccluder(preRestoreRef.current, originalRef.current,
+    // finishMaskRef.current)) — it never reads workingRef.current itself. If
+    // this retouch isn't also mirrored into preRestoreRef, the very next
+    // finishing stroke recomputes from a base that predates this retouch and
+    // silently overwrites it back to the pre-retouch pixels.
+    preRestoreRef.current = copyCanvas(workingRef.current);
     setHasRetouchPreview(false);
     setRetouchPrompt('');
     setMessage('選択範囲の修正を反映しました。続けて別の箇所も直せます。');
@@ -833,6 +855,7 @@ export default function BanzaiPosePage() {
           </div>
           <div className="flex flex-wrap gap-2 border-t border-slate-600 pt-3">
             <button className="rounded bg-green-700 px-4 py-2" onClick={() => setFinishing(false)}>調整を完了</button>
+            <button className="rounded bg-slate-600 px-4 py-2" onClick={switchToRetouch}>気になる箇所を直す に切り替え</button>
           </div>
         </div>}
         {stage === 'done' && retouching && <div className="space-y-3 rounded-xl bg-slate-800 p-3">
@@ -860,6 +883,7 @@ export default function BanzaiPosePage() {
               <button disabled={busy} className="rounded bg-blue-600 px-4 py-2 font-medium disabled:opacity-50" onClick={retouchRun}>{busy ? '生成中…' : 'この内容で生成'}</button>
               {busy && <button className="rounded bg-slate-600 px-4 py-2" onClick={() => abortRef.current?.abort()}>処理を中止</button>}
               <button disabled={busy} className="rounded bg-slate-600 px-4 py-2 disabled:opacity-50" onClick={retouchClose}>やめる</button>
+              <button disabled={busy} className="rounded bg-slate-600 px-4 py-2 disabled:opacity-50" onClick={switchToFinishing}>仕上がりを微調整 に切り替え</button>
             </div>
           </>}
           {hasRetouchPreview && <div className="flex flex-wrap gap-2 border-t border-slate-600 pt-3">
