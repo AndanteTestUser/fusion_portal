@@ -100,6 +100,81 @@ export function transformSelection(source, rect, transform) {
   return output;
 }
 
+export function maskBounds(mask) {
+  if (!mask) return null;
+  const { width, height } = mask;
+  const data = mask.getContext('2d').getImageData(0, 0, width, height).data;
+  let minX = width; let minY = height; let maxX = -1; let maxY = -1;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (data[(y * width + x) * 4 + 3] < 64) continue;
+      minX = Math.min(minX, x); minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x); maxY = Math.max(maxY, y);
+    }
+  }
+  return maxX < 0 ? null : { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 };
+}
+
+export function createSubjectMask(width, height, subject) {
+  const mask = makeCanvas(width, height);
+  const ctx = mask.getContext('2d');
+  ctx.fillStyle = '#fff';
+  for (const region of subject?.regions || []) {
+    const polygon = region?.polygon || [];
+    if (polygon.length < 3) continue;
+    ctx.beginPath();
+    polygon.forEach((point, index) => {
+      const x = Number(point.x) * width / 1000;
+      const y = Number(point.y) * height / 1000;
+      if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.closePath(); ctx.fill();
+  }
+  return mask;
+}
+
+function transformedMaskedLayer(layer, bounds, transform) {
+  const scaleX = Math.max(0.35, Math.min(1.75, Number(transform.scaleX ?? transform.scale) || 1));
+  const scaleY = Math.max(0.35, Math.min(1.75, Number(transform.scaleY ?? transform.scale) || 1));
+  const rotation = (Number(transform.rotation) || 0) * Math.PI / 180;
+  const centerX = bounds.x + bounds.width / 2 + (Number(transform.offsetX) || 0);
+  const centerY = bounds.y + bounds.height / 2 + (Number(transform.offsetY) || 0);
+  const output = makeCanvas(layer.width, layer.height);
+  const ctx = output.getContext('2d');
+  ctx.save(); ctx.translate(centerX, centerY); ctx.rotate(rotation); ctx.scale(scaleX, scaleY);
+  ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(layer, bounds.x, bounds.y, bounds.width, bounds.height, -bounds.width / 2, -bounds.height / 2, bounds.width, bounds.height);
+  ctx.restore();
+  return output;
+}
+
+export function transformMask(mask, transform, selectedBounds = null) {
+  const bounds = selectedBounds || maskBounds(mask);
+  return bounds ? transformedMaskedLayer(mask, bounds, transform) : copyCanvas(mask);
+}
+
+export function transformMaskedSelection(source, mask, transform, selectedBounds = null) {
+  const bounds = selectedBounds || maskBounds(mask);
+  if (!bounds) return copyCanvas(source);
+
+  const selected = copyCanvas(source);
+  const selectedCtx = selected.getContext('2d');
+  selectedCtx.globalCompositeOperation = 'destination-in';
+  selectedCtx.drawImage(mask, 0, 0);
+  selectedCtx.globalCompositeOperation = 'source-over';
+
+  const output = copyCanvas(source);
+  const fill = makeCanvas(source.width, source.height);
+  const fillCtx = fill.getContext('2d');
+  fillCtx.fillStyle = boundaryColor(source, bounds);
+  fillCtx.fillRect(0, 0, fill.width, fill.height);
+  fillCtx.globalCompositeOperation = 'destination-in';
+  fillCtx.drawImage(mask, 0, 0);
+  output.getContext('2d').drawImage(fill, 0, 0);
+  output.getContext('2d').drawImage(transformedMaskedLayer(selected, bounds, transform), 0, 0);
+  return output;
+}
+
 export function fullSelection(width, height) {
   const mask = makeCanvas(width, height);
   const ctx = mask.getContext('2d');
@@ -181,4 +256,3 @@ export async function loadRepairSession() {
     });
   } finally { db.close(); }
 }
-
