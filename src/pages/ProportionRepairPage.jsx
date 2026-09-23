@@ -1,21 +1,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useApiKeys } from '../context/ApiKeyContext.jsx';
 import { useWkAutoLoad } from '../hooks/useWkAutoLoad.js';
-import { copyCanvas, editWithProvider } from '../lib/banzaiPipeline.js';
+import { analyzeSubjectsWithProvider, copyCanvas, editWithProvider, makeCanvas, maskHasPaint } from '../lib/banzaiPipeline.js';
 import {
   buildRepairPrompt,
   canvasToDataUrl,
   comparisonPositionFromClientX,
+  createSubjectMask,
   dataUrlToCanvas,
   DEFAULT_STRETCH_FACTOR,
   fullSelection,
   loadRepairSession,
+  maskBounds,
   normalizeSelectionRect,
   readFileAsDataUrl,
   resizeCanvas,
   saveRepairSession,
   stretchedDimensions,
-  transformSelection,
+  transformMaskedSelection,
+  transformMask,
 } from '../lib/proportionRepair.js';
 
 const STEPS = [
@@ -93,14 +96,18 @@ export default function ProportionRepairPage() {
   const manualRef = useRef(null);
   const normalizedRef = useRef(null);
   const repairedRef = useRef(null);
+  const subjectMaskRef = useRef(null);
+  const subjectCandidatesRef = useRef([]);
   const undoRef = useRef([]);
   const [step, setStep] = useState(1);
   const [originalMeta, setOriginalMeta] = useState(null);
   const [stretchFactor, setStretchFactor] = useState(DEFAULT_STRETCH_FACTOR);
   const [selection, setSelection] = useState(null);
-  const [transform, setTransform] = useState({ scale: 0.78, rotation: 0, offsetX: 0, offsetY: 0 });
+  const [transform, setTransform] = useState({ scaleX: 0.78, scaleY: 0.78, rotation: 0, offsetX: 0, offsetY: 0 });
   const [editorMode, setEditorMode] = useState('pan');
   const [editorZoom, setEditorZoom] = useState(1);
+  const [brush, setBrush] = useState(36);
+  const [subjectCandidates, setSubjectCandidates] = useState([]);
   const [provider, setProvider] = useState('openai');
   const [fallback, setFallback] = useState(true);
   const [repairNotes, setRepairNotes] = useState('灰色の塗り跡、黒い継ぎ目、切り抜き境界、途切れた背景と髪を自然につなぐ');
@@ -126,10 +133,12 @@ export default function ProportionRepairPage() {
     manualRef.current = copyCanvas(stretched);
     normalizedRef.current = null;
     repairedRef.current = null;
+    subjectMaskRef.current = makeCanvas(stretched.width, stretched.height);
+    subjectCandidatesRef.current = [];
     undoRef.current = [];
     setOriginalMeta({ width: original.width, height: original.height, ratio: original.width / original.height, filename });
     setUrls({ original: canvasToDataUrl(original), stretched: canvasToDataUrl(stretched), manual: canvasToDataUrl(stretched), normalized: '', repaired: '' });
-    setSelection(null); setEditorMode('pan'); setEditorZoom(1); setStep(1); setRequestCount(0); setSlider(50);
+    setSelection(null); setSubjectCandidates([]); setTransform({ scaleX: 0.78, scaleY: 0.78, rotation: 0, offsetX: 0, offsetY: 0 }); setEditorMode('pan'); setEditorZoom(1); setStep(1); setRequestCount(0); setSlider(50);
     setMessage('元画像の解像度と縦横比を記録しました。工程2へ進めます。');
     setVersion((value) => value + 1);
   }, [stretchFactor]);
@@ -157,7 +166,11 @@ export default function ProportionRepairPage() {
         if (!active) return;
         originalRef.current = original; stretchedRef.current = stretched; manualRef.current = manual;
         normalizedRef.current = normalized; repairedRef.current = repaired;
+        const maskSource = manual || stretched;
+        subjectMaskRef.current = maskSource ? makeCanvas(maskSource.width, maskSource.height) : null;
+        subjectCandidatesRef.current = [];
         setUrls(session.urls); setOriginalMeta(session.originalMeta); setStretchFactor(session.stretchFactor || DEFAULT_STRETCH_FACTOR);
+        setSelection(null); setSubjectCandidates([]); setTransform({ scaleX: 0.78, scaleY: 0.78, rotation: 0, offsetX: 0, offsetY: 0 });
         setStep(session.step || 1); setProvider(session.provider || 'openai'); setRepairNotes(session.repairNotes || '');
         setRequestCount(session.requestCount || 0); setMessage('前回の頭身補正セッションを復元しました。'); setVersion((value) => value + 1);
       } catch { /* a broken optional draft must not block a new workflow */ }
@@ -174,9 +187,10 @@ export default function ProportionRepairPage() {
   }, [urls, originalMeta, stretchFactor, step, provider, repairNotes, requestCount]);
 
   const previewCanvas = useMemo(() => {
-    if (step !== 3 || !manualRef.current || !selection) return null;
-    return transformSelection(manualRef.current, selection, transform);
-  }, [step, selection, transform, version]);
+    if (step !== 3 || !manualRef.current || !subjectMaskRef.current || !selection) return null;
+    if (editorMode !== 'pan') return null;
+    return transformMaskedSelection(manualRef.current, subjectMaskRef.current, transform, selection);
+  }, [step, selection, transform, version, editorMode]);
 
   useEffect(() => {
     const visible = canvasRef.current;
@@ -186,7 +200,10 @@ export default function ProportionRepairPage() {
     visible.width = image.width; visible.height = image.height;
     const ctx = visible.getContext('2d');
     ctx.drawImage(image, 0, 0);
-    if (step === 3 && selection) {
+    if (step === 3 && subjectMaskRef.current && selection) {
+      const overlay = editorMode === 'pan' ? transformMask(subjectMaskRef.current, transform, selection) : subjectMaskRef.current;
+      ctx.save(); ctx.globalAlpha = 0.38; ctx.drawImage(overlay, 0, 0); ctx.restore();
+    } else if (step === 3 && selection && editorMode === 'rect') {
       ctx.save(); ctx.strokeStyle = '#22d3ee'; ctx.lineWidth = Math.max(3, image.width / 250); ctx.setLineDash([12, 8]);
       ctx.strokeRect(selection.x, selection.y, selection.width, selection.height); ctx.restore();
     }
@@ -196,30 +213,77 @@ export default function ProportionRepairPage() {
     const rect = canvasRef.current.getBoundingClientRect();
     return { x: (event.clientX - rect.left) * canvasRef.current.width / rect.width, y: (event.clientY - rect.top) * canvasRef.current.height / rect.height };
   };
+  const defaultTransform = () => ({ scaleX: 0.78, scaleY: 0.78, rotation: 0, offsetX: 0, offsetY: 0 });
+  const refreshSelectionFromMask = () => {
+    const bounds = maskBounds(subjectMaskRef.current);
+    setSelection(bounds); setVersion((value) => value + 1);
+    return bounds;
+  };
+  const paintMaskStroke = (from, to, erase = false) => {
+    const mask = subjectMaskRef.current;
+    if (!mask) return;
+    const ctx = mask.getContext('2d');
+    ctx.save();
+    ctx.globalCompositeOperation = erase ? 'destination-out' : 'source-over';
+    ctx.strokeStyle = '#fff'; ctx.fillStyle = '#fff';
+    ctx.lineWidth = brush * mask.width / 800; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.lineTo(to.x, to.y); ctx.stroke();
+    ctx.beginPath(); ctx.arc(to.x, to.y, ctx.lineWidth / 2, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  };
+  const expandSelectionToPoint = (point) => {
+    const radius = brush * manualRef.current.width / 1600;
+    setSelection((current) => {
+      const dab = { x: Math.max(0, point.x - radius), y: Math.max(0, point.y - radius), width: radius * 2, height: radius * 2 };
+      if (!current) return dab;
+      const x = Math.min(current.x, dab.x); const y = Math.min(current.y, dab.y);
+      const right = Math.max(current.x + current.width, dab.x + dab.width);
+      const bottom = Math.max(current.y + current.height, dab.y + dab.height);
+      return { x, y, width: right - x, height: bottom - y };
+    });
+  };
+  const startMaskMode = (mode) => {
+    setTransform({ scaleX: 1, scaleY: 1, rotation: 0, offsetX: 0, offsetY: 0 }); setEditorMode(mode);
+    setMessage(mode === 'rect' ? '矩形で大まかに選択します。人物単位の選択にはAI候補または追加・除外塗りを使ってください。' : mode === 'paint' ? '追加塗りモードです。選択人物に含めたい部分を塗ってください。' : '除外塗りモードです。他の人物や背景へはみ出した部分を塗って除外してください。');
+  };
   const pointerDown = (event) => {
-    if (step !== 3 || editorMode !== 'select' || busy || !manualRef.current) return;
+    if (step !== 3 || editorMode === 'pan' || busy || !manualRef.current) return;
     event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId);
-    pointerRef.current = canvasPosition(event); setSelection(null);
+    const point = canvasPosition(event);
+    pointerRef.current = { start: point, last: point };
+    if (editorMode === 'rect') setSelection(null);
+    else {
+      paintMaskStroke(point, point, editorMode === 'erase');
+      if (editorMode === 'paint') expandSelectionToPoint(point);
+      setVersion((value) => value + 1);
+    }
   };
   const pointerMove = (event) => {
     if (!pointerRef.current || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
     event.preventDefault();
-    setSelection(normalizeSelectionRect(pointerRef.current, canvasPosition(event), manualRef.current.width, manualRef.current.height));
+    const point = canvasPosition(event);
+    if (editorMode === 'rect') setSelection(normalizeSelectionRect(pointerRef.current.start, point, manualRef.current.width, manualRef.current.height));
+    else { paintMaskStroke(pointerRef.current.last, point, editorMode === 'erase'); pointerRef.current.last = point; if (editorMode === 'paint') expandSelectionToPoint(point); setVersion((value) => value + 1); }
   };
   const pointerUp = (event) => {
     if (!pointerRef.current || !manualRef.current) return;
-    const next = normalizeSelectionRect(pointerRef.current, canvasPosition(event), manualRef.current.width, manualRef.current.height);
+    const next = editorMode === 'rect' ? normalizeSelectionRect(pointerRef.current.start, canvasPosition(event), manualRef.current.width, manualRef.current.height) : maskBounds(subjectMaskRef.current);
     pointerRef.current = null;
     if (!next) return;
-    setSelection(next);
+    if (editorMode === 'rect') {
+      subjectMaskRef.current = makeCanvas(manualRef.current.width, manualRef.current.height);
+      const ctx = subjectMaskRef.current.getContext('2d'); ctx.fillStyle = '#fff'; ctx.fillRect(next.x, next.y, next.width, next.height);
+    }
+    refreshSelectionFromMask();
+    setTransform(defaultTransform());
     setEditorMode('pan');
-    setMessage('範囲を選択しました。表示移動モードに戻しました。下のボタンで大きさと位置を調整してください。');
+    setMessage('人物範囲を更新しました。表示移動モードに戻しました。必要なら追加・除外塗りで境界を補正してください。');
   };
   const pointerCancel = () => { pointerRef.current = null; };
 
   const changeTransform = (patch) => setTransform((current) => ({ ...current, ...patch }));
   const nudgeTransform = (key, amount) => setTransform((current) => {
-    const limits = key === 'scale' ? [0.45, 1.4] : key === 'rotation' ? [-30, 30] : [-400, 400];
+    const limits = key === 'scaleX' || key === 'scaleY' ? [0.35, 1.6] : key === 'rotation' ? [-30, 30] : [-400, 400];
     const next = Math.max(limits[0], Math.min(limits[1], Number((current[key] + amount).toFixed(2))));
     return { ...current, [key]: next };
   });
@@ -229,22 +293,53 @@ export default function ProportionRepairPage() {
     const size = stretchedDimensions(originalRef.current.width, originalRef.current.height, stretchFactor);
     stretchedRef.current = resizeCanvas(originalRef.current, size.width, size.height);
     manualRef.current = copyCanvas(stretchedRef.current);
+    subjectMaskRef.current = makeCanvas(size.width, size.height); subjectCandidatesRef.current = [];
     normalizedRef.current = null; repairedRef.current = null; undoRef.current = [];
     setUrls((current) => ({ ...current, stretched: canvasToDataUrl(stretchedRef.current), manual: canvasToDataUrl(manualRef.current), normalized: '', repaired: '' }));
-    setSelection(null); setEditorMode('pan'); setEditorZoom(1); setStep(2); setMessage(`横幅${size.width}pxを維持し、高さだけ${size.height}pxへ伸長しました。`); setVersion((value) => value + 1);
+    setSelection(null); setSubjectCandidates([]); setTransform(defaultTransform()); setEditorMode('pan'); setEditorZoom(1); setStep(2); setMessage(`横幅${size.width}pxを維持し、高さだけ${size.height}pxへ伸長しました。`); setVersion((value) => value + 1);
+  };
+
+  const runSubjectAnalysis = async () => {
+    if (!manualRef.current) return;
+    const key = entries[provider]?.apiKey;
+    if (!key) return setMessage(`設定画面で${provider === 'openai' ? 'OpenAI' : 'Gemini'} APIキーを設定してください。`);
+    const controller = new AbortController(); abortRef.current = controller; setBusy(true);
+    setMessage(`${provider === 'openai' ? 'OpenAI' : 'Gemini'}で人物候補を分離しています…`); setRequestCount((value) => value + 1);
+    try {
+      const result = await analyzeSubjectsWithProvider({ provider, key, image: manualRef.current, signal: controller.signal });
+      const candidates = result.subjects.map((subject) => ({ subject, mask: createSubjectMask(manualRef.current.width, manualRef.current.height, subject) }));
+      subjectCandidatesRef.current = candidates;
+      setSubjectCandidates(candidates.map(({ subject }, index) => ({ index, id: subject.id, label: subject.label, description: subject.description })));
+      setMessage(candidates.length ? `${candidates.length}人の人物候補を検出しました。対象人物を選び、赤いマスクを塗り補正してください。` : '人物候補を検出できませんでした。追加塗りで対象人物を選択してください。');
+    } catch (error) { setMessage(error.name === 'AbortError' ? '人物候補の解析を中止しました。' : `人物候補の解析に失敗しました: ${error.message}`); }
+    finally { setBusy(false); abortRef.current = null; }
+  };
+
+  const chooseSubjectCandidate = (index) => {
+    const candidate = subjectCandidatesRef.current[index];
+    if (!candidate) return;
+    subjectMaskRef.current = copyCanvas(candidate.mask); setTransform(defaultTransform()); setEditorMode('pan');
+    refreshSelectionFromMask(); setMessage(`${candidate.subject.label}を選択しました。重なり境界が違う場合は追加・除外塗りで補正してください。`);
+  };
+  const clearSubjectMask = () => {
+    if (!manualRef.current) return;
+    subjectMaskRef.current = makeCanvas(manualRef.current.width, manualRef.current.height);
+    setSelection(null); setTransform(defaultTransform()); setEditorMode('pan'); setVersion((value) => value + 1);
+    setMessage('人物選択を消去しました。候補を選び直すか、追加塗りで選択してください。');
   };
 
   const applyTransform = () => {
-    if (!selection || !manualRef.current) return setMessage('先に画像上で頭部などの範囲を囲んでください。');
+    if (!subjectMaskRef.current || !maskHasPaint(subjectMaskRef.current) || !manualRef.current) return setMessage('先に人物候補を選ぶか、対象人物を塗ってください。');
     undoRef.current = [...undoRef.current.slice(-9), copyCanvas(manualRef.current)];
-    manualRef.current = transformSelection(manualRef.current, selection, transform);
-    updateUrl('manual', manualRef.current); setSelection(null); setTransform({ scale: 0.78, rotation: 0, offsetX: 0, offsetY: 0 });
-    setMessage('選択範囲の変形を適用しました。必要なら別の範囲も続けて調整できます。'); setVersion((value) => value + 1);
+    manualRef.current = transformMaskedSelection(manualRef.current, subjectMaskRef.current, transform, selection);
+    subjectMaskRef.current = makeCanvas(manualRef.current.width, manualRef.current.height); subjectCandidatesRef.current = [];
+    updateUrl('manual', manualRef.current); setSelection(null); setSubjectCandidates([]); setTransform(defaultTransform());
+    setMessage('選択した人物画素だけに変形を適用しました。必要なら別の人物も続けて選択できます。'); setVersion((value) => value + 1);
   };
   const undo = () => {
     const previous = undoRef.current.pop();
     if (!previous) return;
-    manualRef.current = previous; updateUrl('manual', previous); setSelection(null); setMessage('直前の調整を戻しました。'); setVersion((value) => value + 1);
+    manualRef.current = previous; subjectMaskRef.current = makeCanvas(previous.width, previous.height); updateUrl('manual', previous); setSelection(null); setSubjectCandidates([]); setMessage('直前の調整を戻しました。'); setVersion((value) => value + 1);
   };
 
   const loadManual = async (file) => {
@@ -252,7 +347,8 @@ export default function ProportionRepairPage() {
     try {
       const canvas = await dataUrlToCanvas(await readFileAsDataUrl(file));
       undoRef.current = manualRef.current ? [...undoRef.current.slice(-9), copyCanvas(manualRef.current)] : [];
-      manualRef.current = canvas; updateUrl('manual', canvas); setSelection(null); setEditorMode('pan'); setEditorZoom(1); setStep(3);
+      manualRef.current = canvas; subjectMaskRef.current = makeCanvas(canvas.width, canvas.height); subjectCandidatesRef.current = [];
+      updateUrl('manual', canvas); setSelection(null); setSubjectCandidates([]); setTransform(defaultTransform()); setEditorMode('pan'); setEditorZoom(1); setStep(3);
       setMessage('外部で手修正した画像を読み込みました。元比率へ復元できます。'); setVersion((value) => value + 1);
     } catch (error) { setMessage(error.message); }
   };
@@ -301,7 +397,8 @@ export default function ProportionRepairPage() {
 
   const reset = () => {
     abortRef.current?.abort(); originalRef.current = stretchedRef.current = manualRef.current = normalizedRef.current = repairedRef.current = null;
-    undoRef.current = []; setUrls({ original: '', stretched: '', manual: '', normalized: '', repaired: '' }); setOriginalMeta(null); setSelection(null); setEditorMode('pan'); setEditorZoom(1); setStep(1); setRequestCount(0); setMessage('元画像を選択してください。'); setVersion((value) => value + 1);
+    subjectMaskRef.current = null; subjectCandidatesRef.current = []; undoRef.current = [];
+    setUrls({ original: '', stretched: '', manual: '', normalized: '', repaired: '' }); setOriginalMeta(null); setSelection(null); setSubjectCandidates([]); setTransform({ scaleX: 0.78, scaleY: 0.78, rotation: 0, offsetX: 0, offsetY: 0 }); setEditorMode('pan'); setEditorZoom(1); setStep(1); setRequestCount(0); setMessage('元画像を選択してください。'); setVersion((value) => value + 1);
   };
 
   const canVisit = (number) => number === 1 ? Boolean(urls.original) : number === 2 ? Boolean(urls.stretched) : number === 3 ? Boolean(urls.manual) : Boolean(urls.normalized);
@@ -328,7 +425,8 @@ export default function ProportionRepairPage() {
               {step === 3 && urls.manual && (
                 <div className="sticky left-0 top-0 z-30 flex w-full flex-wrap justify-center gap-1 border-b border-slate-600 bg-slate-950/95 p-1.5 shadow-xl backdrop-blur">
                   <button type="button" className={`min-h-11 rounded-lg px-3 text-xs font-bold ${editorMode === 'pan' ? 'bg-cyan-600 text-white' : 'bg-slate-800 text-slate-200'}`} onClick={() => setEditorMode('pan')}>✋ 表示を移動</button>
-                  <button type="button" className={`min-h-11 rounded-lg px-3 text-xs font-bold ${editorMode === 'select' ? 'bg-cyan-600 text-white' : 'bg-slate-800 text-slate-200'}`} onClick={() => { setEditorMode('select'); setSelection(null); setMessage('選択モードです。修正したい範囲を指で囲んでください。選択後は自動で表示移動モードへ戻ります。'); }}>＋ 範囲を選択</button>
+                  <button type="button" className={`min-h-11 rounded-lg px-3 text-xs font-bold ${editorMode === 'paint' ? 'bg-rose-600 text-white' : 'bg-slate-800 text-slate-200'}`} onClick={() => startMaskMode('paint')}>＋ 追加塗り</button>
+                  <button type="button" className={`min-h-11 rounded-lg px-3 text-xs font-bold ${editorMode === 'erase' ? 'bg-rose-600 text-white' : 'bg-slate-800 text-slate-200'}`} onClick={() => startMaskMode('erase')}>− 除外塗り</button>
                   <button type="button" aria-label="縮小表示" className="min-h-11 min-w-11 rounded-lg bg-slate-800 text-lg" onClick={() => setEditorZoom((value) => Math.max(0.75, Number((value - 0.25).toFixed(2))))}>−</button>
                   <span className="flex min-h-11 min-w-14 items-center justify-center rounded-lg bg-black/50 px-2 font-mono text-xs">{Math.round(editorZoom * 100)}%</span>
                   <button type="button" aria-label="拡大表示" className="min-h-11 min-w-11 rounded-lg bg-slate-800 text-lg" onClick={() => setEditorZoom((value) => Math.min(3, Number((value + 0.25).toFixed(2))))}>＋</button>
@@ -346,7 +444,7 @@ export default function ProportionRepairPage() {
                   onPointerUp={pointerUp}
                   onPointerCancel={pointerCancel}
                   className={step === 3
-                    ? `shrink-0 select-none ${editorMode === 'select' ? 'cursor-crosshair touch-none' : 'cursor-grab touch-pan-x touch-pan-y'}`
+                    ? `shrink-0 select-none ${editorMode !== 'pan' ? 'cursor-crosshair touch-none' : 'cursor-grab touch-pan-x touch-pan-y'}`
                     : 'max-h-full max-w-full object-contain'}
                   style={step === 3 ? { width: `${editorZoom * 100}%`, height: 'auto', maxWidth: 'none' } : undefined}
                 />
@@ -371,21 +469,30 @@ export default function ProportionRepairPage() {
                 <Range label="縦伸長率" value={Number(stretchFactor.toFixed(3))} min={1.05} max={1.6} step={0.01} onChange={setStretchFactor} />
                 <div className="grid grid-cols-4 gap-1">{[1.2, 1.25, 4 / 3, 1.4].map((value) => <button key={value} type="button" className="btn px-1 text-xs" onClick={() => setStretchFactor(value)}>{value === 4 / 3 ? '4/3' : value}</button>)}</div>
                 <button type="button" className="btn w-full" onClick={rebuildStretch}>この倍率で再作成</button>
-                <button type="button" className="btn w-full border-cyan-700 bg-cyan-700" onClick={() => { setStep(3); setEditorMode('pan'); setEditorZoom(1); setMessage('まず表示をスクロールして対象を画面内に置き、「範囲を選択」を押してください。'); }}>工程3へ</button>
+                <button type="button" className="btn w-full border-cyan-700 bg-cyan-700" onClick={() => { setStep(3); setEditorMode('pan'); setEditorZoom(1); setMessage('「AIで人物候補を検出」または追加塗りで、変形する人物を選択してください。'); }}>工程3へ</button>
               </>}
 
               {step === 3 && <>
-                <h2 className="font-bold">工程3：頭身調整</h2>
+                <h2 className="font-bold">工程3：人物単位の頭身調整</h2>
                 <div className="rounded-lg border border-cyan-800 bg-cyan-950/40 p-3 text-sm text-cyan-100">
-                  <b>{selection ? '範囲を選択済み' : editorMode === 'select' ? '選択モード' : '表示移動モード'}</b>
-                  <p className="mt-1 text-xs text-cyan-200/80">表示移動中は画像を上下左右へスクロールできます。「範囲を選択」を押した時だけ、指のドラッグが選択操作になります。</p>
+                  <b>{selection ? '人物マスクを選択済み' : editorMode === 'paint' ? '追加塗りモード' : editorMode === 'erase' ? '除外塗りモード' : editorMode === 'rect' ? '矩形選択モード' : '表示移動モード'}</b>
+                  <p className="mt-1 text-xs text-cyan-200/80">赤い部分だけを変形します。人物が重なる部分は、追加塗りと除外塗りで前後の人物を分けてください。</p>
                 </div>
-                <Range label="選択範囲の倍率" value={transform.scale} min={0.45} max={1.4} step={0.01} unit="×" onChange={(value) => setTransform((current) => ({ ...current, scale: value }))} />
-                <div className="grid grid-cols-3 gap-2">
-                  <button type="button" className="btn min-h-11" disabled={!selection} onClick={() => nudgeTransform('scale', -0.05)}>− 小さく</button>
-                  <button type="button" className="btn min-h-11" disabled={!selection} onClick={() => changeTransform({ scale: 1 })}>等倍</button>
-                  <button type="button" className="btn min-h-11" disabled={!selection} onClick={() => nudgeTransform('scale', 0.05)}>＋ 大きく</button>
+                <div className="space-y-2 rounded-lg border border-slate-700 bg-slate-950 p-3">
+                  <label className="block text-xs text-slate-300">人物検出AI<select value={provider} onChange={(event) => setProvider(event.target.value)} disabled={busy} className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 p-2 text-sm"><option value="openai">OpenAI</option><option value="gemini">Gemini</option></select></label>
+                  {busy ? <button type="button" className="w-full rounded-lg bg-rose-700 px-3 py-3 font-bold" onClick={() => abortRef.current?.abort()}>人物検出を中止</button> : <button type="button" className="w-full rounded-lg bg-violet-700 px-3 py-3 font-bold disabled:opacity-40" disabled={!entries[provider]?.apiKey} onClick={runSubjectAnalysis}>AIで人物候補を検出（1リクエスト）</button>}
+                  {subjectCandidates.length > 0 && <div className="space-y-2 pt-1">{subjectCandidates.map((candidate) => <button key={candidate.id} type="button" className="w-full rounded-lg border border-violet-700 bg-violet-950/50 p-3 text-left" onClick={() => chooseSubjectCandidate(candidate.index)}><b className="block text-sm">人物{candidate.index + 1}：{candidate.label}</b><span className="mt-1 block text-xs text-slate-300">{candidate.description}</span></button>)}</div>}
                 </div>
+                <div className="space-y-2 rounded-lg border border-slate-700 p-3">
+                  <p className="text-sm font-semibold">マスクを手動補正</p>
+                  <div className="grid grid-cols-2 gap-2"><button type="button" className={`btn min-h-11 ${editorMode === 'paint' ? 'border-rose-600 bg-rose-700' : ''}`} onClick={() => startMaskMode('paint')}>＋ 選択へ追加</button><button type="button" className={`btn min-h-11 ${editorMode === 'erase' ? 'border-rose-600 bg-rose-700' : ''}`} onClick={() => startMaskMode('erase')}>− 選択から除外</button></div>
+                  <Range label="ブラシの太さ" value={brush} min={8} max={120} onChange={setBrush} />
+                  <div className="grid grid-cols-2 gap-2"><button type="button" className="btn min-h-11" onClick={() => startMaskMode('rect')}>矩形で大まかに選択</button><button type="button" className="btn min-h-11" disabled={!selection} onClick={clearSubjectMask}>人物選択を消去</button></div>
+                </div>
+                <Range label="横幅" value={transform.scaleX} min={0.35} max={1.6} step={0.01} unit="×" onChange={(value) => setTransform((current) => ({ ...current, scaleX: value }))} />
+                <div className="grid grid-cols-3 gap-2"><button type="button" className="btn min-h-11" disabled={!selection} onClick={() => nudgeTransform('scaleX', -0.05)}>− 狭く</button><button type="button" className="btn min-h-11" disabled={!selection} onClick={() => changeTransform({ scaleX: 1 })}>横等倍</button><button type="button" className="btn min-h-11" disabled={!selection} onClick={() => nudgeTransform('scaleX', 0.05)}>＋ 広く</button></div>
+                <Range label="縦幅" value={transform.scaleY} min={0.35} max={1.6} step={0.01} unit="×" onChange={(value) => setTransform((current) => ({ ...current, scaleY: value }))} />
+                <div className="grid grid-cols-3 gap-2"><button type="button" className="btn min-h-11" disabled={!selection} onClick={() => nudgeTransform('scaleY', -0.05)}>− 低く</button><button type="button" className="btn min-h-11" disabled={!selection} onClick={() => changeTransform({ scaleY: 1 })}>縦等倍</button><button type="button" className="btn min-h-11" disabled={!selection} onClick={() => nudgeTransform('scaleY', 0.05)}>＋ 高く</button></div>
                 <Range label="左右移動" value={transform.offsetX} min={-400} max={400} unit="px" onChange={(value) => setTransform((current) => ({ ...current, offsetX: value }))} />
                 <Range label="上下移動" value={transform.offsetY} min={-400} max={400} unit="px" onChange={(value) => setTransform((current) => ({ ...current, offsetY: value }))} />
                 <div className="mx-auto grid w-44 grid-cols-3 gap-2">
@@ -405,9 +512,10 @@ export default function ProportionRepairPage() {
                   <button type="button" className="btn min-h-11" disabled={!selection} onClick={() => changeTransform({ rotation: 0 })}>0°</button>
                   <button type="button" className="btn min-h-11" disabled={!selection} onClick={() => nudgeTransform('rotation', 1)}>＋1° ↷</button>
                 </div>
-                <div className="grid grid-cols-2 gap-2"><button type="button" className="btn" onClick={undo} disabled={!undoRef.current.length}>↶ 戻す</button><button type="button" className="btn border-cyan-700 bg-cyan-700" onClick={applyTransform} disabled={!selection}>調整を適用</button></div>
+                <div className="grid grid-cols-2 gap-2"><button type="button" className="btn" onClick={undo} disabled={!undoRef.current.length}>↶ 戻す</button><button type="button" className="btn border-cyan-700 bg-cyan-700" onClick={applyTransform} disabled={!selection}>人物の変形を適用</button></div>
                 <button type="button" className="btn w-full" onClick={() => manualFileRef.current?.click()}>外部で手修正した画像を読込</button>
-                <button type="button" className="btn w-full border-cyan-700 bg-cyan-700" onClick={normalize}>元比率へ戻して工程4へ</button>
+                <button type="button" className="btn w-full border-cyan-700 bg-cyan-700 disabled:opacity-40" disabled={Boolean(selection)} onClick={normalize}>元比率へ戻して工程4へ</button>
+                {selection && <p className="text-xs text-amber-300">工程4へ進む前に「人物の変形を適用」するか、「人物選択を消去」してください。</p>}
               </>}
 
               {step === 4 && <>
