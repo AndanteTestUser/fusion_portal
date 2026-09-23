@@ -215,6 +215,30 @@ const POSE_SCHEMA = {
   required: ['found', 'confidence', 'summary', 'head', 'torso', 'leftShoulder', 'rightShoulder', 'leftElbow', 'rightElbow', 'leftWrist', 'rightWrist', 'occluders'],
 };
 
+const SUBJECTS_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  properties: {
+    found: { type: 'boolean' },
+    subjects: {
+      type: 'array', items: {
+        type: 'object', additionalProperties: false,
+        properties: {
+          id: { type: 'string' }, label: { type: 'string' }, description: { type: 'string' },
+          regions: {
+            type: 'array', items: {
+              type: 'object', additionalProperties: false,
+              properties: { polygon: { type: 'array', items: POINT_SCHEMA } },
+              required: ['polygon'],
+            },
+          },
+        },
+        required: ['id', 'label', 'description', 'regions'],
+      },
+    },
+  },
+  required: ['found', 'subjects'],
+};
+
 function normalizePose(value) {
   if (!value || typeof value !== 'object') throw new Error('人物解析の結果を読み取れませんでした');
   const clamp = (n) => Math.max(0, Math.min(1000, Number(n) || 0));
@@ -233,6 +257,21 @@ function normalizePose(value) {
   };
   for (const name of ['head', 'torso', 'leftShoulder', 'rightShoulder', 'leftElbow', 'rightElbow', 'leftWrist', 'rightWrist']) normalized[name] = point(value[name]);
   return normalized;
+}
+
+function normalizeSubjects(value) {
+  if (!value || typeof value !== 'object') throw new Error('人物候補の解析結果を読み取れませんでした');
+  const clamp = (n) => Math.max(0, Math.min(1000, Number(n) || 0));
+  const point = (p) => ({ x: clamp(p?.x), y: clamp(p?.y) });
+  const subjects = Array.isArray(value.subjects) ? value.subjects.map((subject, index) => ({
+    id: String(subject?.id || `subject-${index + 1}`),
+    label: String(subject?.label || `人物${index + 1}`),
+    description: String(subject?.description || ''),
+    regions: Array.isArray(subject?.regions) ? subject.regions.map((region) => ({
+      polygon: Array.isArray(region?.polygon) ? region.polygon.map(point) : [],
+    })).filter((region) => region.polygon.length >= 3) : [],
+  })).filter((subject) => subject.regions.length) : [];
+  return { found: Boolean(value.found) && subjects.length > 0, subjects };
 }
 
 function openAIOutputText(json) {
@@ -324,6 +363,48 @@ export async function analyzePoseWithProvider({ provider, key, image, signal }) 
   const text = json.candidates?.[0]?.content?.parts?.filter((part) => part.text).map((part) => part.text).join('');
   if (!text) throw new Error('Geminiから人物解析結果が返されませんでした');
   return normalizePose(parseStructuredJson(text));
+}
+
+export async function analyzeSubjectsWithProvider({ provider, key, image, signal }) {
+  if (!key) throw new Error(`${provider === 'openai' ? 'OpenAI' : 'Gemini'}のAPIキーを設定してください`);
+  const instruction = `Identify every prominent human figure in this image as a separate selectable subject. Return coordinates normalized from 0 to 1000 relative to the full image. For each person, trace only that person's visible pixels as tightly as possible, including visible hair, face, clothing, arms, hands, legs and feet. When people overlap, stop each polygon at the visible occlusion boundary: never include pixels belonging to the person in front as part of the person behind. A person's visible silhouette may be disconnected by occlusion, so return multiple polygon regions when necessary. Use 8 to 40 points per polygon. Order subjects from foreground to background. label must be a short Japanese position label such as 上側の人物 or 下側の人物, and description must briefly distinguish clothing, hair and position. Do not include furniture, floor, shadows or effects.`;
+  const imageDataUrl = analysisImageDataUrl(image);
+
+  if (provider === 'openai') {
+    const response = await providerFetch('https://api.openai.com/v1/responses', {
+      method: 'POST', signal,
+      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: DEFAULT_OPENAI_VISION_MODEL,
+        input: [{ role: 'user', content: [
+          { type: 'input_text', text: instruction },
+          { type: 'input_image', image_url: imageDataUrl, detail: 'high' },
+        ] }],
+        text: { format: { type: 'json_schema', name: 'subject_segmentation', strict: true, schema: SUBJECTS_SCHEMA } },
+      }),
+    }, 'OpenAI');
+    if (!response.ok) await responseError(response);
+    const text = openAIOutputText(await response.json());
+    if (!text) throw new Error('OpenAIから人物候補が返されませんでした');
+    return normalizeSubjects(parseStructuredJson(text));
+  }
+
+  const response = await providerFetch(`https://generativelanguage.googleapis.com/v1beta/models/${DEFAULT_GEMINI_MODEL}:generateContent`, {
+    method: 'POST', signal,
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+    body: JSON.stringify({
+      contents: [{ role: 'user', parts: [
+        { text: instruction },
+        { inlineData: { mimeType: 'image/jpeg', data: imageDataUrl.split(',')[1] } },
+      ] }],
+      generationConfig: { responseModalities: ['TEXT'], responseMimeType: 'application/json', responseSchema: SUBJECTS_SCHEMA, maxOutputTokens: 8192 },
+    }),
+  }, 'Gemini');
+  if (!response.ok) await responseError(response);
+  const json = await response.json();
+  const text = json.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('') || '';
+  if (!text) throw new Error('Geminiから人物候補が返されませんでした');
+  return normalizeSubjects(parseStructuredJson(text));
 }
 
 const ARM_CHECK_SCHEMA = {

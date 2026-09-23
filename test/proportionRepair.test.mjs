@@ -4,6 +4,7 @@ import {
   buildRepairPrompt,
   clampComparisonPosition,
   comparisonPositionFromClientX,
+  maskBounds,
   normalizedDimensions,
   normalizeSelectionRect,
   stretchedDimensions,
@@ -11,6 +12,13 @@ import {
 
 test('stretchedDimensions keeps width and stretches height by four thirds', () => {
   assert.deepEqual(stretchedDimensions(584, 1000), { width: 584, height: 1333 });
+});
+
+test('maskBounds finds only painted alpha pixels', () => {
+  const width = 5; const height = 4; const data = new Uint8ClampedArray(width * height * 4);
+  for (const [x, y] of [[1, 1], [3, 2], [2, 3]]) data[(y * width + x) * 4 + 3] = 255;
+  const mask = { width, height, getContext: () => ({ getImageData: () => ({ data }) }) };
+  assert.deepEqual(maskBounds(mask), { x: 1, y: 1, width: 3, height: 3 });
 });
 
 test('normalizedDimensions restores the exact original pixel dimensions', () => {
@@ -35,4 +43,3 @@ test('repair prompt freezes manually adjusted proportions and scene geometry', (
   assert.match(prompt, /Preserve every character identity/);
   assert.match(prompt, /repair the gray patch/);
 });
-
