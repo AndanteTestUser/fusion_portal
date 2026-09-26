@@ -43,7 +43,8 @@ test('migrated records are returned from the Workspace folder, without UI mocks'
   assert.equal(response.ok, true);
   assert.deepEqual(Array.from(response.settings, (record) => record.id), ['seed-overhang-delta', 'seed-tea-time-trap']);
   assert.equal(again.settings.length, 2); // 読み取り時に消費しない。
-  assert.equal(response.settings[0].generatedImageFileId, null);
+  assert.equal(response.settings[0].generatedImageFileId, '1Yuxk4813XFBwrhagGH7JdrLAgZUBYqRv');
+  assert.equal(response.settings[1].generatedImageFileId, '1cs4XxTMk4sIqhHiPPkisMGCp93gmoRvH');
 });
 
 test('a repeated save request returns one record', () => {
