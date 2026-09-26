@@ -39,8 +39,10 @@ function makeScript() {
 test('migrated records are returned from the Workspace folder, without UI mocks', () => {
   const { context } = makeScript();
   const response = context.doGet({ parameter: { action: 'list', secret: 'test-secret' } });
+  const again = context.doGet({ parameter: { action: 'list', secret: 'test-secret' } });
   assert.equal(response.ok, true);
   assert.deepEqual(Array.from(response.settings, (record) => record.id), ['seed-overhang-delta', 'seed-tea-time-trap']);
+  assert.equal(again.settings.length, 2); // 読み取り時に消費しない。
   assert.equal(response.settings[0].generatedImageFileId, null);
 });
 
@@ -52,4 +54,11 @@ test('a repeated save request returns one record', () => {
   assert.equal(first.ok, true);
   assert.equal(second.setting.id, first.setting.id);
   assert.equal(records.length, seeds.length + 1);
+});
+
+test('the setting store rejects the WK relay secret', () => {
+  const { context, records } = makeScript();
+  const response = context.doPost({ postData: { contents: JSON.stringify({ action: 'save', secret: 'wk-secret', requestId: 'wrong-123', title: '不可' }) } });
+  assert.equal(response.ok, false);
+  assert.equal(records.length, seeds.length);
 });
