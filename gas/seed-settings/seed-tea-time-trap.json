@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "seed-tea-time-trap",
+  "title": "ティータイム・トラップ",
+  "text": "【T（Tension）】\n両手首を背後でまとめ、胸郭を開くことで脇の下に強いテンションをかけ、無防備に展開させる。\n\n【Time（長時間ホールド）】\n術者の大腿部に対象の背面を乗せるベースポジション。重心を術者の体幹で支え、長時間の攻撃を可能にする。\n\n【Trap（封殺の罠）】\n後ろ手の固定と術者の脚部によるロック機構。対象が身をよじるほど自身の体重と拘束具で身動きが取れなくなる。",
+  "imagePrompt": "",
+  "baseImageFileId": null,
+  "generatedImageFileId": "1cs4XxTMk4sIqhHiPPkisMGCp93gmoRvH",
+  "source": "seed",
+  "createdAt": "2026-09-25T06:05:00.000Z"
+}

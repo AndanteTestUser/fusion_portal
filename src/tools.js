@@ -31,4 +31,11 @@ export const tools = [
     description: '縦伸長で頭身を手調整し、元比率へ戻して編集痕だけを修復します。',
     component: lazy(() => import('./pages/ProportionRepairPage.jsx')),
   },
+  {
+    path: '/setting-builder',
+    title: '設定ビルダー',
+    icon: '📚',
+    description: '画像を元に設定と図解を作成し、Google Workspaceへ登録します。',
+    component: lazy(() => import('./pages/SettingBuilderPage.jsx')),
+  },
 ];
