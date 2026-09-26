@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApiKeys } from '../context/ApiKeyContext.jsx';
-import { useWkImages } from '../context/WkImageContext.jsx';
 import { useWkAutoLoad } from '../hooks/useWkAutoLoad.js';
 import { clearSettingDraft, loadSettingDraft, saveSettingDraft } from '../lib/settingDraft.js';
-import { getSettingImage, listSettings, saveSetting } from '../lib/settingStore.js';
+import { getSettingImage, listSettings, loadSettingStoreConfig, saveSetting } from '../lib/settingStore.js';
 
 const INTRO = { role: 'notice', text: 'ベース画像を読み込み、名称と設定を対話で検討できます。図解指示と公式設定を編集して登録してください。' };
 const TEXT_MODEL = 'gemini-3-flash-preview';
@@ -75,7 +74,7 @@ function WkReceiver({ hasImage, onLoad }) {
 
 export default function SettingBuilderPage() {
   const { geminiApiKey } = useApiKeys();
-  const { gasConfig } = useWkImages();
+  const [storeConfig] = useState(loadSettingStoreConfig);
   const [tab, setTab] = useState('stock');
   const [baseImage, setBaseImage] = useState(null);
   const [generatedImage, setGeneratedImage] = useState(null);
@@ -116,12 +115,12 @@ export default function SettingBuilderPage() {
 
   const refreshSettings = useCallback(async () => {
     try {
-      setSettings(await listSettings(gasConfig));
+      setSettings(await listSettings(storeConfig));
       setStatus('');
     } catch (error) {
       setStatus(error.message);
     }
-  }, [gasConfig.url, gasConfig.secret]);
+  }, [storeConfig.url, storeConfig.secret]);
 
   useEffect(() => { refreshSettings(); }, [refreshSettings]);
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [chatHistory, tab]);
@@ -199,7 +198,7 @@ export default function SettingBuilderPage() {
     const id = requestId || crypto.randomUUID();
     setRequestId(id);
     try {
-      await saveSetting(gasConfig, { requestId: id, title: title.trim(), text: settingText, imagePrompt, baseImage, generatedImage });
+      await saveSetting(storeConfig, { requestId: id, title: title.trim(), text: settingText, imagePrompt, baseImage, generatedImage });
       setTitle(''); setSettingText(''); setBaseImage(null); setGeneratedImage(null); setImagePrompt('');
       setChatHistory([INTRO]); setRequestId(null);
       await clearSettingDraft();
@@ -253,7 +252,7 @@ export default function SettingBuilderPage() {
           {tab === 'stock' ? <div className="mx-auto max-w-4xl space-y-4">
             <div className="flex items-center justify-between"><h2 className="text-lg font-semibold">登録済み設定</h2><button className="btn bg-slate-700 text-xs" onClick={refreshSettings}>更新</button></div>
             {settings.map((setting) => <article key={setting.id} className="flex flex-col gap-4 rounded-lg border border-slate-700 bg-slate-900 p-4 sm:flex-row">
-              {setting.generatedImageFileId && <StockImage config={gasConfig} id={setting.generatedImageFileId} />}
+              {setting.generatedImageFileId && <StockImage config={storeConfig} id={setting.generatedImageFileId} />}
               <div className="min-w-0 flex-1"><h3 className="font-semibold">{setting.title}</h3><p className="mt-2 whitespace-pre-wrap text-sm text-slate-300">{setting.text || '（説明テキストなし）'}</p><p className="mt-3 text-xs text-slate-500">登録: {new Date(setting.createdAt).toLocaleString('ja-JP')}</p></div>
             </article>)}
             {!settings.length && <p className="text-sm text-slate-400">登録済み設定はありません。</p>}

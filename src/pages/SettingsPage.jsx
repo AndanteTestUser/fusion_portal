@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApiKeys } from '../context/ApiKeyContext.jsx';
 import { useWkImages } from '../context/WkImageContext.jsx';
 import { providers } from '../providers.js';
+import { listSettings, loadSettingStoreConfig, saveSettingStoreConfig } from '../lib/settingStore.js';
 import {
   hasVault,
   listStoredWraps,
@@ -187,6 +188,44 @@ function WkGasSection() {
       </p>
     </section>
   );
+}
+
+function SettingStoreSection() {
+  const [config, setConfig] = useState(loadSettingStoreConfig);
+  const [message, setMessage] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const save = async (event) => {
+    event.preventDefault();
+    try {
+      saveSettingStoreConfig(config);
+      setMessage('設定ストアの接続情報を保存しました。');
+    } catch { setMessage('接続情報を保存できませんでした。'); }
+  };
+
+  const testConnection = async () => {
+    setBusy(true);
+    try {
+      const settings = await listSettings(config);
+      setMessage(`接続しました。登録済み設定: ${settings.length}件`);
+    } catch (error) { setMessage(`接続エラー: ${error.message}`); }
+    finally { setBusy(false); }
+  };
+
+  return <section className="flex flex-col gap-3 rounded-lg bg-neutral-800 p-4">
+    <h2 className="text-sm font-bold text-neutral-300">設定ストア (専用 GAS)</h2>
+    <p className="text-xs text-neutral-400">設定ビルダーから Google Drive に永続登録する専用 Web App です。WK画像の一時取り込みとは別の URL とシークレットを使用します。手順は <code>gas/SettingStore.README.md</code> を参照してください。</p>
+    <form onSubmit={save} className="flex flex-col gap-3">
+      <label className="flex flex-col gap-1 text-xs text-neutral-400">設定ストア Web App の URL
+        <input type="url" autoComplete="off" value={config.url} onChange={(e) => setConfig({ ...config, url: e.target.value })} placeholder="https://script.google.com/macros/s/.../exec" className="rounded border border-neutral-600 bg-neutral-900 px-3 py-2 text-sm text-white" />
+      </label>
+      <label className="flex flex-col gap-1 text-xs text-neutral-400">設定ストアのシークレット
+        <input type="password" autoComplete="off" value={config.secret} onChange={(e) => setConfig({ ...config, secret: e.target.value })} className="rounded border border-neutral-600 bg-neutral-900 px-3 py-2 text-sm text-white" />
+      </label>
+      <div className="flex gap-2"><button type="submit" className="btn">💾 保存</button><button type="button" onClick={testConnection} disabled={busy} className="btn">{busy ? '接続中…' : '接続テスト'}</button></div>
+    </form>
+    {message && <p role="status" className="text-xs text-amber-400">{message}</p>}
+  </section>;
 }
 
 export default function SettingsPage() {
@@ -382,6 +421,7 @@ export default function SettingsPage() {
       </section>
 
       <WkGasSection />
+      <SettingStoreSection />
 
       <section className="flex flex-col gap-3 rounded-lg bg-neutral-800 p-4">
         <h2 className="text-sm font-bold text-neutral-300">端末への保存(Vault)</h2>

@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import test from 'node:test';
 
-const source = readFileSync(new URL('../gas/WkImageRelay.gs', import.meta.url), 'utf8');
+const source = readFileSync(new URL('../gas/SettingStore.gs', import.meta.url), 'utf8');
 const seeds = [
   'seed-overhang-delta.json',
   'seed-tea-time-trap.json',
@@ -26,7 +26,7 @@ function makeScript() {
   };
   const context = {
     Date,
-    PropertiesService: { getScriptProperties: () => ({ getProperty: (key) => key === 'WK_IMAGE_SECRET' ? 'test-secret' : 'folder-id' }) },
+    PropertiesService: { getScriptProperties: () => ({ getProperty: (key) => key === 'SETTING_STORE_SECRET' ? 'test-secret' : 'folder-id' }) },
     DriveApp: { getFolderById: () => folder },
     ContentService: { MimeType: { JSON: 'json' }, createTextOutput: (value) => ({ setMimeType: () => JSON.parse(value) }) },
     Utilities: { newBlob: (text, type, name) => ({ text, type, name }) },
@@ -38,7 +38,7 @@ function makeScript() {
 
 test('migrated records are returned from the Workspace folder, without UI mocks', () => {
   const { context } = makeScript();
-  const response = context.doGet({ parameter: { action: 'settings.list', secret: 'test-secret' } });
+  const response = context.doGet({ parameter: { action: 'list', secret: 'test-secret' } });
   assert.equal(response.ok, true);
   assert.deepEqual(Array.from(response.settings, (record) => record.id), ['seed-overhang-delta', 'seed-tea-time-trap']);
   assert.equal(response.settings[0].generatedImageFileId, null);
@@ -46,7 +46,7 @@ test('migrated records are returned from the Workspace folder, without UI mocks'
 
 test('a repeated save request returns one record', () => {
   const { context, records } = makeScript();
-  const request = { postData: { contents: JSON.stringify({ action: 'settings.save', secret: 'test-secret', requestId: 'repeat-123', title: 'テスト', text: '本文' }) } };
+  const request = { postData: { contents: JSON.stringify({ action: 'save', secret: 'test-secret', requestId: 'repeat-123', title: 'テスト', text: '本文' }) } };
   const first = context.doPost(request);
   const second = context.doPost(request);
   assert.equal(first.ok, true);
