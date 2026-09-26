@@ -18,8 +18,9 @@
 `GET ?action=list` は一覧を読み、`GET ?action=image&id=...` は画像を読み、
 `POST` の `action: save` は新規登録する。一覧取得でファイルを削除しない。
 
-元コードのモック２件は `gas/seed-settings/` の JSON として一度だけ登録する。
-仮の `placehold.co` 画像は実画像ではないため移行しない。
+元コードのモック２件は `gas/seed-settings/` の JSON として一度だけ登録済み。
+指定された図解画像２件も `images` に保存し、各 JSON の
+`generatedImageFileId` から参照する。元コードの `placehold.co` 仮画像は移行しない。
 
 URL とシークレットを知る利用者は、この Web App の保存データを読み書きできる。
 Portal の接続情報はこの端末の localStorage に保存される。個人利用向けの方式である。
