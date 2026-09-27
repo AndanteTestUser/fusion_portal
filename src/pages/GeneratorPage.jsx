@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApiKeys } from '../context/ApiKeyContext.jsx';
 import { useWkAutoLoad } from '../hooks/useWkAutoLoad.js';
 import { detectHands, handSelectionPolygon, nearestHand } from '../lib/handSelection.js';
+import { connectionCorridorBounds, connectionWidthForBounds, defaultConnectionAnchor, transformPoint } from '../lib/moveConnection.js';
 
 // 元の index.html（vanilla JS 実装）のロジックをそのまま React に移植したもの。
 // キャンバス上の一時的な描画状態(座標・切り出し済みキャンバスなど)は再描画の
@@ -206,7 +207,6 @@ export default function GeneratorPage() {
   const [apiKeyInput, setApiKeyInput] = useState(geminiApiKey);
 
   const [currentMode, setCurrentModeState] = useState('lasso');
-  const [selectionExtent, setSelectionExtent] = useState('hand');
   const [autoSelectHint, setAutoSelectHint] = useState(null);
   const [hasSelection, setHasSelectionState] = useState(false);
   const [toast, setToast] = useState({ msg: '', visible: false });
@@ -223,6 +223,8 @@ export default function GeneratorPage() {
   const cutPieceBoundsRef = useRef(null);
   const cutPieceRotationRef = useRef(0);
   const dragOffsetRef = useRef({ x: 0, y: 0 });
+  const connectionAnchorRef = useRef(null);
+  const connectionWidthRef = useRef(null);
   const isDrawingRef = useRef(false);
   const isDraggingRef = useRef(false);
   const lastPosRef = useRef({ x: 0, y: 0 });
@@ -237,7 +239,22 @@ export default function GeneratorPage() {
     setCurrentModeState(mode);
   }, []);
 
-  const drawPiece = useCallback((targetCtx, points, pieceCanvasLayer, bounds, offset, rotation, showFrame) => {
+  const drawConnectionCorridor = useCallback((targetCtx, bounds, offset, rotation, anchor, width) => {
+    if (!bounds || !anchor || !offset || (Math.abs(offset.x) < 0.5 && Math.abs(offset.y) < 0.5)) return;
+    const movedAnchor = transformPoint(anchor, bounds, offset, rotation);
+    targetCtx.save();
+    targetCtx.beginPath();
+    targetCtx.moveTo(anchor.x, anchor.y);
+    targetCtx.lineTo(movedAnchor.x, movedAnchor.y);
+    targetCtx.lineCap = 'round';
+    targetCtx.lineJoin = 'round';
+    targetCtx.lineWidth = Math.max(14, width || connectionWidthForBounds(bounds));
+    targetCtx.strokeStyle = MASK_COLOR;
+    targetCtx.stroke();
+    targetCtx.restore();
+  }, []);
+
+  const drawPiece = useCallback((targetCtx, points, pieceCanvasLayer, bounds, offset, rotation, showFrame, connectionAnchor, connectionWidth) => {
     if (!pieceCanvasLayer || !bounds || points.length === 0) return;
 
     targetCtx.save();
@@ -259,6 +276,10 @@ export default function GeneratorPage() {
     targetCtx.strokeStyle = MASK_COLOR;
     targetCtx.stroke();
 
+    // The connection corridor is an explicit geometry constraint: the AI must rebuild
+    // anatomy continuously from the original attachment point to the moved attachment point.
+    drawConnectionCorridor(targetCtx, bounds, offset, rotation, connectionAnchor, connectionWidth);
+
     const centerX = bounds.x + bounds.width / 2 + offset.x;
     const centerY = bounds.y + bounds.height / 2 + offset.y;
 
@@ -273,7 +294,7 @@ export default function GeneratorPage() {
       targetCtx.strokeRect(bounds.x + offset.x, bounds.y + offset.y, bounds.width, bounds.height);
     }
     targetCtx.restore();
-  }, []);
+  }, [drawConnectionCorridor]);
 
   // drawPiece からマスク塗り・選択枠を省き、移動後のパーツ画像だけを描くバージョン。
   // AIの生成結果に、ユーザーが配置した通りのピクセルをそのまま上書きするために使う
@@ -348,6 +369,8 @@ export default function GeneratorPage() {
     cutPieceBoundsRef.current = null;
     cutPieceRotationRef.current = 0;
     dragOffsetRef.current = { x: 0, y: 0 };
+    connectionAnchorRef.current = null;
+    connectionWidthRef.current = null;
     setMode('lasso');
     renderCanvas();
   }, [renderCanvas, setMode]);
