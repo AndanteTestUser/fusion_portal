@@ -663,9 +663,11 @@ export default function GeneratorPage() {
     const addEditBounds = (editBounds, offset, rotation, anchor, width) => {
       if (!editBounds) return;
       bounds.push(editBounds);
-      bounds.push(computeMovedBounds(editBounds, offset, rotation));
       if (anchor && canvas && (Math.abs(offset.x) >= 0.5 || Math.abs(offset.y) >= 0.5)) {
         const movedAnchor = transformPoint(anchor, editBounds, offset, rotation);
+        // Trust only the corridor around the attachment path. The moved part itself is
+        // restored pixel-for-pixel after generation, so a broad moved-part rectangle would
+        // unnecessarily permit AI edits around unrelated nearby anatomy.
         bounds.push(
           connectionCorridorBounds(
             anchor,
