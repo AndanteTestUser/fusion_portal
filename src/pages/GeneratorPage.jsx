@@ -1017,6 +1017,7 @@ The FIRST image is the edit canvas. The SECOND image is a transparent CONNECTION
     collectMaskBounds,
     measureMaskRemaining,
     buildPiecesOnlyLayer,
+    buildConnectionGuideCanvas,
   ]);
 
   const handleSave = useCallback(() => {
