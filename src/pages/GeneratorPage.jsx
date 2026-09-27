@@ -576,6 +576,54 @@ export default function GeneratorPage() {
   // 現在の状態(元画像+配置済みパーツ+マスク色の穴)をそのまま描いたcanvasを返す。
   // AIへ送る画像であると同時に、生成後に「信頼範囲の外側」で使う土台にもなる
   // (=ユーザーが配置した通りのもの。AIの出力はまだ一切含まない)。
+  const drawConnectionGuide = useCallback((ctx, bounds, offset, rotation, anchor, width) => {
+    if (!bounds || !anchor || (Math.abs(offset.x) < 0.5 && Math.abs(offset.y) < 0.5)) return;
+    const movedAnchor = transformPoint(anchor, bounds, offset, rotation);
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(anchor.x, anchor.y);
+    ctx.lineTo(movedAnchor.x, movedAnchor.y);
+    ctx.lineCap = 'round';
+    ctx.lineWidth = Math.max(3, Math.min(10, (width || 24) * 0.14));
+    ctx.strokeStyle = '#00e5ff';
+    ctx.setLineDash([10, 8]);
+    ctx.stroke();
+    ctx.fillStyle = '#00e5ff';
+    ctx.beginPath();
+    ctx.arc(movedAnchor.x, movedAnchor.y, Math.max(4, ctx.lineWidth), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }, []);
+
+  const buildConnectionGuideCanvas = useCallback(() => {
+    const canvas = canvasRef.current;
+    const guide = document.createElement('canvas');
+    guide.width = canvas.width;
+    guide.height = canvas.height;
+    const ctx = guide.getContext('2d');
+    pastEditsRef.current.forEach((edit) =>
+      drawConnectionGuide(
+        ctx,
+        edit.cutPieceBounds,
+        edit.dragOffset,
+        edit.cutPieceRotation,
+        edit.connectionAnchor,
+        edit.connectionWidth
+      )
+    );
+    if (hasSelection) {
+      drawConnectionGuide(
+        ctx,
+        cutPieceBoundsRef.current,
+        dragOffsetRef.current,
+        cutPieceRotationRef.current,
+        connectionAnchorRef.current,
+        connectionWidthRef.current
+      );
+    }
+    return guide;
+  }, [drawConnectionGuide, hasSelection]);
+
   const buildCleanCanvas = useCallback(() => {
     const canvas = canvasRef.current;
     const cCanvas = document.createElement('canvas');
@@ -835,6 +883,8 @@ export default function GeneratorPage() {
     // 「移動後のパーツは絶対」として扱うため、生成結果を受け取った後にこのレイヤーを
     // そのまま焼き込み直す。AIがパーツ自体を描き変えても最終的には上書きされる。
     const piecesLayer = buildPiecesOnlyLayer();
+    const connectionGuide = buildConnectionGuideCanvas();
+    const guideData = connectionGuide.toDataURL('image/png').split(',')[1];
 
     setLoading({ visible: true, text: '処理中...' });
 
@@ -849,9 +899,10 @@ export default function GeneratorPage() {
 
 Solid ${MASK_COLOR} (magenta) marks the VACATED SOURCE AREA where the moved part used to be. The moved part must NOT be reconstructed, duplicated, or echoed inside that source area. Inpaint only what would naturally be visible after the part has left: underlying body/background/garment surfaces and the minimum connecting anatomy needed to reach the moved part at its new location. Never create an extra copy of the moved hand, fingers, limb, object, or accessory at the old position.
 
-The magenta CONNECTION CORRIDOR explicitly joins the original attachment point to the moved attachment point. Reconstruct one continuous, anatomically coherent connecting limb/segment through that corridor all the way to the moved part. Do not leave a gap, floating part, abrupt cutoff, or disconnected wrist/joint. Around the NEW location, redraw only the minimum seam/connection region necessary to connect existing anatomy to the fixed moved part. Do not move any other body part. Do not change pose, composition, character count, limb count, clothing, accessories, camera angle, or unrelated shading/detail. Every magenta pixel must disappear. Keep the exact original art style and level of detail everywhere outside the source-hole and connection zones.`,
+The FIRST image is the edit canvas. The SECOND image is a transparent CONNECTION GUIDE: each cyan dashed line runs from an original attachment point to the exact moved attachment point, and the cyan dot marks the target attachment. Use the guide as geometry only; cyan must never appear in the output. The magenta CONNECTION CORRIDOR in the first image explicitly joins the same attachment points. Reconstruct one continuous, anatomically coherent connecting limb/segment through that corridor all the way to the moved part. Do not leave a gap, floating part, abrupt cutoff, or disconnected wrist/joint. Around the NEW location, redraw only the minimum seam/connection region necessary to connect existing anatomy to the fixed moved part. Do not move any other body part. Do not change pose, composition, character count, limb count, clothing, accessories, camera angle, or unrelated shading/detail. Every magenta pixel must disappear. Keep the exact original art style and level of detail everywhere outside the source-hole and connection zones.`,
             },
             { inlineData: { mimeType: 'image/jpeg', data: base64Data } },
+            { inlineData: { mimeType: 'image/png', data: guideData } },
           ],
         },
       ],
