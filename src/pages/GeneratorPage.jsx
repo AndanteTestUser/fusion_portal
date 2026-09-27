@@ -677,13 +677,36 @@ export default function GeneratorPage() {
       lassoPointsRef.current = points;
       cutPieceRotationRef.current = 0;
       dragOffsetRef.current = { x: 0, y: 0 };
-      createCutPiece();
+      // createCutPiece は state/ref の更新順に依存するため、ここでは同じ処理を
+      // 新しい points から直接構築する。
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      points.forEach((p) => {
+        minX = Math.min(minX, p.x);
+        minY = Math.min(minY, p.y);
+        maxX = Math.max(maxX, p.x);
+        maxY = Math.max(maxY, p.y);
+      });
+      cutPieceBoundsRef.current = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+      const pieceCanvas = document.createElement('canvas');
+      pieceCanvas.width = canvas.width;
+      pieceCanvas.height = canvas.height;
+      const pCtx = pieceCanvas.getContext('2d');
+      pCtx.beginPath();
+      pCtx.moveTo(points[0].x, points[0].y);
+      for (let i = 1; i < points.length; i++) pCtx.lineTo(points[i].x, points[i].y);
+      pCtx.closePath();
+      pCtx.clip();
+      pCtx.drawImage(originalImageRef.current, 0, 0);
+      cutPieceCanvasRef.current = pieceCanvas;
       setHasSelectionState(true);
       setMode('move');
       showToast('手の候補を選択しました。必要なら手動選択で微調整してください');
       requestAnimationFrame(renderCanvas);
     },
-    [createCutPiece, hasSelection, renderCanvas, selectionExtent, setMode, showToast]
+    [hasSelection, renderCanvas, selectionExtent, setMode, showToast]
   );
 
   const handleUndo = useCallback(() => {
