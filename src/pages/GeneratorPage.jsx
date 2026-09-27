@@ -206,6 +206,7 @@ export default function GeneratorPage() {
 
   const [currentMode, setCurrentModeState] = useState('lasso');
   const [selectionExtent, setSelectionExtent] = useState('hand');
+  const [autoSelectHint, setAutoSelectHint] = useState(null);
   const [hasSelection, setHasSelectionState] = useState(false);
   const [toast, setToast] = useState({ msg: '', visible: false });
   const [loading, setLoading] = useState({ visible: false, text: '処理中...' });
@@ -398,6 +399,7 @@ export default function GeneratorPage() {
       const canvas = canvasRef.current;
       if (!canvas || !originalImageRef.current) return;
 
+      setAutoSelectHint(null);
       const shortSide = Math.min(canvas.width, canvas.height);
       const presets = {
         hand: { rx: 0.055, ry: 0.075, shiftY: 0 },
@@ -991,6 +993,7 @@ export default function GeneratorPage() {
           onClick={() => {
             if (!originalImageRef.current) return showToast('先に画像を読み込んでください');
             setMode('auto-hand');
+            setAutoSelectHint('移動したい手の中央をタップ');
             showToast('移動したい手の中央を画像上でタップしてください');
           }}
           title={`自動選択: ${selectionExtent}`}
@@ -1032,6 +1035,11 @@ export default function GeneratorPage() {
       </div>
 
       <div className="relative flex flex-grow items-center justify-center overflow-hidden bg-black">
+        {autoSelectHint && (
+          <div className="pointer-events-none absolute left-1/2 top-3 z-20 -translate-x-1/2 rounded-full bg-sky-600/90 px-4 py-2 text-xs font-bold shadow-lg">
+            🖐️ {autoSelectHint}
+          </div>
+        )}
         <canvas
           ref={canvasRef}
           className="max-h-full max-w-full touch-none object-contain"
