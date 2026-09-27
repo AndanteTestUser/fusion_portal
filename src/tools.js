@@ -5,9 +5,9 @@ import { lazy } from 'react';
 export const tools = [
   {
     path: '/generator',
-    title: 'AI Image Editor',
+    title: 'Fusion Move',
     icon: '🖼️',
-    description: '画像のパーツを切り貼りし、AIで自然に馴染ませます。',
+    description: '画像内の部位を選択・移動し、移動元と接続部だけをAIで自然に補完します。',
     component: lazy(() => import('./pages/GeneratorPage.jsx')),
   },
   {
