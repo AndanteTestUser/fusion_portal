@@ -810,7 +810,11 @@ export default function GeneratorPage() {
           role: 'user',
           parts: [
             {
-              text: `This is an edited collage image where a body part was repositioned to a new location. Treat the repositioned part's new position, pose, and pixels as FIXED and ABSOLUTE — do not redraw, reshape, or reinterpret the moved part itself. Instead, redraw only the small area immediately AROUND it (the connecting anatomy such as the arm or joint leading into it) so that it naturally connects to the moved part in its new position. Areas filled with solid ${MASK_COLOR} (magenta) are placeholder masks marking missing image data, not an intended color — they must not remain in the output; seamlessly inpaint every masked area and any awkward seams or gaps around the moved part. Do NOT add, remove, or change anything else in the image: no new objects, accessories, jewelry, or clothing that were not already there, and no changes to existing skin texture, shading, wrinkles, creases, or shadows anywhere outside the masked/seam area. Keep the exact original art style and level of detail everywhere else, without altering the overall character design or composition.`,
+              text: `This is a MOVE operation, not a general redraw. A body part has already been cut from its original location and placed at a new location. The moved part's new position, pose, appearance, and pixels are FIXED and ABSOLUTE — never redraw, reshape, replace, or reinterpret that moved part.
+
+Solid ${MASK_COLOR} (magenta) marks the VACATED SOURCE AREA where the moved part used to be. The moved part must NOT be reconstructed, duplicated, or echoed inside that source area. Inpaint only what would naturally be visible after the part has left: underlying body/background/garment surfaces and the minimum connecting anatomy needed to reach the moved part at its new location. Never create an extra copy of the moved hand, fingers, limb, object, or accessory at the old position.
+
+Around the NEW location, redraw only the minimum seam/connection region necessary to connect existing anatomy to the fixed moved part. Do not move any other body part. Do not change pose, composition, character count, limb count, clothing, accessories, camera angle, or unrelated shading/detail. Every magenta pixel must disappear. Keep the exact original art style and level of detail everywhere outside the source-hole and connection zones.`,
             },
             { inlineData: { mimeType: 'image/jpeg', data: base64Data } },
           ],
