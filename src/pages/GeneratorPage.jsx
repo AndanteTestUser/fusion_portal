@@ -394,6 +394,11 @@ export default function GeneratorPage() {
       if (!originalImageRef.current) return;
       const pos = getCanvasPos(e);
 
+      if (currentMode === 'auto-hand') {
+        createAutoHandSelection(pos);
+        return;
+      }
+
       if (currentMode === 'lasso') {
         if (hasSelection && lassoPointsRef.current.length > 0) {
           pastEditsRef.current.push({
@@ -416,7 +421,7 @@ export default function GeneratorPage() {
         lastPosRef.current = pos;
       }
     },
-    [currentMode, hasSelection, getCanvasPos]
+    [currentMode, hasSelection, getCanvasPos, createAutoHandSelection]
   );
 
   const handleMove = useCallback(
@@ -628,6 +633,58 @@ export default function GeneratorPage() {
   );
 
   useWkAutoLoad('/generator', () => Boolean(originalImageRef.current), applyMainImageFromDataUrl);
+
+  // 自動選択の第一段階: ユーザーが画像上で手を1タップすると、その点を中心に
+  // 選択粒度に応じた楕円マスクを作る。AIに部位を描き直させるのではなく、
+  // 既存の cutPieceCanvas / cutPieceBounds に渡すので、その後の移動ロジックは
+  // 手動ラッソと完全に共通になる。
+  const createAutoHandSelection = useCallback(
+    (pos) => {
+      const canvas = canvasRef.current;
+      if (!canvas || !originalImageRef.current) return;
+
+      const shortSide = Math.min(canvas.width, canvas.height);
+      const presets = {
+        hand: { rx: 0.055, ry: 0.075, shiftY: 0 },
+        hand_wrist: { rx: 0.065, ry: 0.11, shiftY: 0.025 },
+        hand_forearm: { rx: 0.08, ry: 0.18, shiftY: 0.08 },
+      };
+      const preset = presets[selectionExtent] || presets.hand;
+      const rx = Math.max(18, shortSide * preset.rx);
+      const ry = Math.max(24, shortSide * preset.ry);
+      const cy = pos.y + shortSide * preset.shiftY;
+
+      const points = [];
+      const steps = 40;
+      for (let i = 0; i < steps; i++) {
+        const angle = (Math.PI * 2 * i) / steps;
+        points.push({
+          x: Math.max(0, Math.min(canvas.width, pos.x + Math.cos(angle) * rx)),
+          y: Math.max(0, Math.min(canvas.height, cy + Math.sin(angle) * ry)),
+        });
+      }
+
+      if (hasSelection && lassoPointsRef.current.length > 0 && cutPieceBoundsRef.current) {
+        pastEditsRef.current.push({
+          lassoPoints: [...lassoPointsRef.current],
+          cutPieceCanvas: cutPieceCanvasRef.current,
+          cutPieceBounds: { ...cutPieceBoundsRef.current },
+          cutPieceRotation: cutPieceRotationRef.current,
+          dragOffset: { ...dragOffsetRef.current },
+        });
+      }
+
+      lassoPointsRef.current = points;
+      cutPieceRotationRef.current = 0;
+      dragOffsetRef.current = { x: 0, y: 0 };
+      createCutPiece();
+      setHasSelectionState(true);
+      setMode('move');
+      showToast('手の候補を選択しました。必要なら手動選択で微調整してください');
+      requestAnimationFrame(renderCanvas);
+    },
+    [createCutPiece, hasSelection, renderCanvas, selectionExtent, setMode, showToast]
+  );
 
   const handleUndo = useCallback(() => {
     if (!originalImageRef.current) return;
@@ -907,7 +964,11 @@ export default function GeneratorPage() {
 
         <button
           className="btn border-sky-700"
-          onClick={() => showToast('手の自動選択は次段階で有効化します。現在は手動選択を使用してください')}
+          onClick={() => {
+            if (!originalImageRef.current) return showToast('先に画像を読み込んでください');
+            setMode('auto-hand');
+            showToast('移動したい手の中央を画像上でタップしてください');
+          }}
           title={`自動選択: ${selectionExtent}`}
         >
           🖐️ 手を自動選択
