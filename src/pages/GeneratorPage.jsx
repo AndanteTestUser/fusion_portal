@@ -78,43 +78,6 @@ const fitWithinMaxDimension = (img) => {
   return resizedCanvas;
 };
 
-// 移動・回転後にパーツが実際に配置されているバウンディングボックスを計算する。
-// drawPiece/drawPieceImageOnly と同じ変換(元の中心を軸に回転してからオフセットを加える)
-// を矩形の4隅に適用し、その外接矩形を返す。
-// 「穴」の元の位置だけでなく、パーツの新しい位置の繋ぎ目も信頼範囲に含めるために使う
-// (これがないと、パーツを大きく動かすほどAIが繋ぎ目を描き直しても
-// compositeTrustedRegionsOnly の段階で無条件に捨てられてしまう)。
-const computeMovedBounds = (bounds, offset, rotation) => {
-  const centerX = bounds.x + bounds.width / 2;
-  const centerY = bounds.y + bounds.height / 2;
-  const rad = (rotation * Math.PI) / 180;
-  const cos = Math.cos(rad);
-  const sin = Math.sin(rad);
-  const corners = [
-    { x: bounds.x, y: bounds.y },
-    { x: bounds.x + bounds.width, y: bounds.y },
-    { x: bounds.x, y: bounds.y + bounds.height },
-    { x: bounds.x + bounds.width, y: bounds.y + bounds.height },
-  ];
-
-  let minX = Infinity;
-  let minY = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-  corners.forEach((p) => {
-    const dx = p.x - centerX;
-    const dy = p.y - centerY;
-    const rx = centerX + dx * cos - dy * sin + offset.x;
-    const ry = centerY + dx * sin + dy * cos + offset.y;
-    minX = Math.min(minX, rx);
-    minY = Math.min(minY, ry);
-    maxX = Math.max(maxX, rx);
-    maxY = Math.max(maxY, ry);
-  });
-
-  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
-};
-
 // 穴(マスク色で塗った範囲)は必ずAIの出力で完全に置き換える。
 // 以前は楕円+放射グラデーションで、穴の縁でAIの出力が半透明(約64%)、
 // 矩形の四隅ではほぼ0%になり、土台のマゼンタが透けて残っていた。
