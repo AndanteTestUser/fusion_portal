@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApiKeys } from '../context/ApiKeyContext.jsx';
 import { useWkAutoLoad } from '../hooks/useWkAutoLoad.js';
+import { detectHands, handSelectionPolygon, nearestHand } from '../lib/handSelection.js';
 
 // 元の index.html（vanilla JS 実装）のロジックをそのまま React に移植したもの。
 // キャンバス上の一時的な描画状態(座標・切り出し済みキャンバスなど)は再描画の
@@ -390,35 +391,63 @@ export default function GeneratorPage() {
     return { x: (clientX - rect.left) * scaleX, y: (clientY - rect.top) * scaleY };
   }, []);
 
-  // 自動選択の第一段階: ユーザーが画像上で手を1タップすると、その点を中心に
-  // 選択粒度に応じた楕円マスクを作る。AIに部位を描き直させるのではなく、
-  // 既存の cutPieceCanvas / cutPieceBounds に渡すので、その後の移動ロジックは
-  // 手動ラッソと完全に共通になる。
+  // 手の自動選択:
+  // 1) MediaPipeで画像内の手ランドマークを検出
+  // 2) ユーザーがタップした位置に最も近い手を選ぶ
+  // 3) 手 / 手首 / 前腕の粒度に応じて選択ポリゴンを生成
+  // 4) 既存の cutPieceCanvas / cutPieceBounds に渡す
+  //
+  // 検出モデルを読み込めない環境では、編集自体を止めず、
+  // タップ位置中心の楕円候補へフォールバックする。
   const createAutoHandSelection = useCallback(
-    (pos) => {
+    async (pos) => {
       const canvas = canvasRef.current;
       if (!canvas || !originalImageRef.current) return;
 
       setAutoSelectHint(null);
-      const shortSide = Math.min(canvas.width, canvas.height);
-      const presets = {
-        hand: { rx: 0.055, ry: 0.075, shiftY: 0 },
-        hand_wrist: { rx: 0.065, ry: 0.11, shiftY: 0.025 },
-        hand_forearm: { rx: 0.08, ry: 0.18, shiftY: 0.08 },
-      };
-      const preset = presets[selectionExtent] || presets.hand;
-      const rx = Math.max(18, shortSide * preset.rx);
-      const ry = Math.max(24, shortSide * preset.ry);
-      const cy = pos.y + shortSide * preset.shiftY;
 
-      const points = [];
-      const steps = 40;
-      for (let i = 0; i < steps; i++) {
-        const angle = (Math.PI * 2 * i) / steps;
-        points.push({
-          x: Math.max(0, Math.min(canvas.width, pos.x + Math.cos(angle) * rx)),
-          y: Math.max(0, Math.min(canvas.height, cy + Math.sin(angle) * ry)),
+      const buildFallbackPoints = () => {
+        const shortSide = Math.min(canvas.width, canvas.height);
+        const presets = {
+          hand: { rx: 0.055, ry: 0.075, shiftY: 0 },
+          hand_wrist: { rx: 0.065, ry: 0.11, shiftY: 0.025 },
+          hand_forearm: { rx: 0.08, ry: 0.18, shiftY: 0.08 },
+        };
+        const preset = presets[selectionExtent] || presets.hand;
+        const rx = Math.max(18, shortSide * preset.rx);
+        const ry = Math.max(24, shortSide * preset.ry);
+        const cy = pos.y + shortSide * preset.shiftY;
+        return Array.from({ length: 40 }, (_, i) => {
+          const angle = (Math.PI * 2 * i) / 40;
+          return {
+            x: Math.max(0, Math.min(canvas.width, pos.x + Math.cos(angle) * rx)),
+            y: Math.max(0, Math.min(canvas.height, cy + Math.sin(angle) * ry)),
+          };
         });
+      };
+
+      let points = [];
+      let detected = false;
+      setLoading({ visible: true, text: '手を検出中...' });
+
+      try {
+        // 表示中のcanvasをそのまま解析することで、WK画像・過去の編集結果など
+        // 現在ユーザーが見ている状態に対して手を検出する。
+        const hands = await detectHands(canvas, canvas.width, canvas.height);
+        const maxDistance = Math.min(canvas.width, canvas.height) * 0.32;
+        const hand = nearestHand(hands, pos, maxDistance);
+        if (hand) {
+          points = handSelectionPolygon(hand, selectionExtent, canvas.width, canvas.height);
+          detected = points.length >= 3;
+        }
+      } catch (error) {
+        // ネットワーク/CSP/モデル読込失敗時は下のフォールバックへ進む。
+      } finally {
+        setLoading({ visible: false, text: '処理中...' });
+      }
+
+      if (!detected) {
+        points = buildFallbackPoints();
       }
 
       if (hasSelection && lassoPointsRef.current.length > 0 && cutPieceBoundsRef.current) {
@@ -434,8 +463,7 @@ export default function GeneratorPage() {
       lassoPointsRef.current = points;
       cutPieceRotationRef.current = 0;
       dragOffsetRef.current = { x: 0, y: 0 };
-      // createCutPiece は state/ref の更新順に依存するため、ここでは同じ処理を
-      // 新しい points から直接構築する。
+
       let minX = Infinity;
       let minY = Infinity;
       let maxX = -Infinity;
@@ -447,6 +475,7 @@ export default function GeneratorPage() {
         maxY = Math.max(maxY, p.y);
       });
       cutPieceBoundsRef.current = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+
       const pieceCanvas = document.createElement('canvas');
       pieceCanvas.width = canvas.width;
       pieceCanvas.height = canvas.height;
@@ -458,14 +487,17 @@ export default function GeneratorPage() {
       pCtx.clip();
       pCtx.drawImage(originalImageRef.current, 0, 0);
       cutPieceCanvasRef.current = pieceCanvas;
+
       setHasSelectionState(true);
       setMode('move');
-      showToast('手の候補を選択しました。必要なら手動選択で微調整してください');
-      requestAnimationFrame(renderCanvas);
+      showToast(
+        detected
+          ? '手を認識して選択しました。ドラッグで移動できます'
+          : '手を認識できなかったため、タップ位置から候補範囲を作成しました'
+      );
     },
-    [hasSelection, renderCanvas, selectionExtent, setMode, showToast]
+    [hasSelection, selectionExtent, setMode, showToast]
   );
-
 
   const handleStart = useCallback(
     (e) => {
