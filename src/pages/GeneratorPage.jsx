@@ -652,16 +652,42 @@ export default function GeneratorPage() {
   // pastEdits と、現在ドラッグ中の選択パーツの両方が対象。
   // 新しい位置も含めないと、パーツを動かした先の繋ぎ目にAIの結果が一切反映されない。
   const collectMaskBounds = useCallback(() => {
+    const canvas = canvasRef.current;
     const bounds = [];
-    pastEditsRef.current.forEach((edit) => {
-      if (!edit.cutPieceBounds) return;
-      bounds.push(edit.cutPieceBounds);
-      bounds.push(computeMovedBounds(edit.cutPieceBounds, edit.dragOffset, edit.cutPieceRotation));
-    });
+    const addEditBounds = (editBounds, offset, rotation, anchor, width) => {
+      if (!editBounds) return;
+      bounds.push(editBounds);
+      bounds.push(computeMovedBounds(editBounds, offset, rotation));
+      if (anchor && canvas && (Math.abs(offset.x) >= 0.5 || Math.abs(offset.y) >= 0.5)) {
+        const movedAnchor = transformPoint(anchor, editBounds, offset, rotation);
+        bounds.push(
+          connectionCorridorBounds(
+            anchor,
+            movedAnchor,
+            Math.max(14, width || connectionWidthForBounds(editBounds)),
+            canvas.width,
+            canvas.height
+          )
+        );
+      }
+    };
+
+    pastEditsRef.current.forEach((edit) =>
+      addEditBounds(
+        edit.cutPieceBounds,
+        edit.dragOffset,
+        edit.cutPieceRotation,
+        edit.connectionAnchor,
+        edit.connectionWidth
+      )
+    );
     if (hasSelection && cutPieceBoundsRef.current) {
-      bounds.push(cutPieceBoundsRef.current);
-      bounds.push(
-        computeMovedBounds(cutPieceBoundsRef.current, dragOffsetRef.current, cutPieceRotationRef.current)
+      addEditBounds(
+        cutPieceBoundsRef.current,
+        dragOffsetRef.current,
+        cutPieceRotationRef.current,
+        connectionAnchorRef.current,
+        connectionWidthRef.current
       );
     }
     return bounds;
@@ -852,7 +878,7 @@ export default function GeneratorPage() {
 
 Solid ${MASK_COLOR} (magenta) marks the VACATED SOURCE AREA where the moved part used to be. The moved part must NOT be reconstructed, duplicated, or echoed inside that source area. Inpaint only what would naturally be visible after the part has left: underlying body/background/garment surfaces and the minimum connecting anatomy needed to reach the moved part at its new location. Never create an extra copy of the moved hand, fingers, limb, object, or accessory at the old position.
 
-Around the NEW location, redraw only the minimum seam/connection region necessary to connect existing anatomy to the fixed moved part. Do not move any other body part. Do not change pose, composition, character count, limb count, clothing, accessories, camera angle, or unrelated shading/detail. Every magenta pixel must disappear. Keep the exact original art style and level of detail everywhere outside the source-hole and connection zones.`,
+The magenta CONNECTION CORRIDOR explicitly joins the original attachment point to the moved attachment point. Reconstruct one continuous, anatomically coherent connecting limb/segment through that corridor all the way to the moved part. Do not leave a gap, floating part, abrupt cutoff, or disconnected wrist/joint. Around the NEW location, redraw only the minimum seam/connection region necessary to connect existing anatomy to the fixed moved part. Do not move any other body part. Do not change pose, composition, character count, limb count, clothing, accessories, camera angle, or unrelated shading/detail. Every magenta pixel must disappear. Keep the exact original art style and level of detail everywhere outside the source-hole and connection zones.`,
             },
             { inlineData: { mimeType: 'image/jpeg', data: base64Data } },
           ],
