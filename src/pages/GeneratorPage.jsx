@@ -435,6 +435,20 @@ export default function GeneratorPage() {
 
       setAutoSelectHint(null);
 
+      if (hasSelection && lassoPointsRef.current.length > 0 && cutPieceBoundsRef.current) {
+        pastEditsRef.current.push({
+          lassoPoints: [...lassoPointsRef.current],
+          cutPieceCanvas: cutPieceCanvasRef.current,
+          cutPieceBounds: { ...cutPieceBoundsRef.current },
+          cutPieceRotation: cutPieceRotationRef.current,
+          dragOffset: { ...dragOffsetRef.current },
+          connectionAnchor: connectionAnchorRef.current ? { ...connectionAnchorRef.current } : null,
+          connectionWidth: connectionWidthRef.current,
+        });
+      }
+      connectionAnchorRef.current = null;
+      connectionWidthRef.current = null;
+
       const buildFallbackPoints = () => {
         const shortSide = Math.min(canvas.width, canvas.height);
         const preset = { rx: 0.06, ry: 0.085, shiftY: 0 };
@@ -478,18 +492,6 @@ export default function GeneratorPage() {
         // For fallback/manual-like selection we cannot know the wrist exactly; use the
         // nearest edge point to the tap as a stable connection seed and let AI refine locally.
         connectionAnchorRef.current = null;
-      }
-
-      if (hasSelection && lassoPointsRef.current.length > 0 && cutPieceBoundsRef.current) {
-        pastEditsRef.current.push({
-          lassoPoints: [...lassoPointsRef.current],
-          cutPieceCanvas: cutPieceCanvasRef.current,
-          cutPieceBounds: { ...cutPieceBoundsRef.current },
-          cutPieceRotation: cutPieceRotationRef.current,
-          dragOffset: { ...dragOffsetRef.current },
-          connectionAnchor: connectionAnchorRef.current ? { ...connectionAnchorRef.current } : null,
-          connectionWidth: connectionWidthRef.current,
-        });
       }
 
       lassoPointsRef.current = points;
@@ -551,6 +553,8 @@ export default function GeneratorPage() {
             cutPieceBounds: { ...cutPieceBoundsRef.current },
             cutPieceRotation: cutPieceRotationRef.current,
             dragOffset: { ...dragOffsetRef.current },
+            connectionAnchor: connectionAnchorRef.current ? { ...connectionAnchorRef.current } : null,
+            connectionWidth: connectionWidthRef.current,
           });
         }
         lassoPointsRef.current = [pos];
@@ -560,6 +564,8 @@ export default function GeneratorPage() {
         cutPieceBoundsRef.current = null;
         cutPieceRotationRef.current = 0;
         dragOffsetRef.current = { x: 0, y: 0 };
+        connectionAnchorRef.current = null;
+        connectionWidthRef.current = null;
       } else if (currentMode === 'move' && hasSelection) {
         isDraggingRef.current = true;
         lastPosRef.current = pos;
