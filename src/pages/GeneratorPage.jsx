@@ -328,7 +328,9 @@ export default function GeneratorPage() {
         edit.cutPieceBounds,
         edit.dragOffset,
         edit.cutPieceRotation,
-        false
+        false,
+        edit.connectionAnchor,
+        edit.connectionWidth
       )
     );
 
@@ -340,7 +342,9 @@ export default function GeneratorPage() {
         cutPieceBoundsRef.current,
         dragOffsetRef.current,
         cutPieceRotationRef.current,
-        true
+        true,
+        connectionAnchorRef.current,
+        connectionWidthRef.current
       );
     }
 
@@ -389,6 +393,8 @@ export default function GeneratorPage() {
       maxY = Math.max(maxY, p.y);
     });
     cutPieceBoundsRef.current = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+    connectionAnchorRef.current = defaultConnectionAnchor(cutPieceBoundsRef.current);
+    connectionWidthRef.current = connectionWidthForBounds(cutPieceBoundsRef.current);
 
     const pieceCanvas = document.createElement('canvas');
     pieceCanvas.width = canvas.width;
@@ -431,12 +437,7 @@ export default function GeneratorPage() {
 
       const buildFallbackPoints = () => {
         const shortSide = Math.min(canvas.width, canvas.height);
-        const presets = {
-          hand: { rx: 0.055, ry: 0.075, shiftY: 0 },
-          hand_wrist: { rx: 0.065, ry: 0.11, shiftY: 0.025 },
-          hand_forearm: { rx: 0.08, ry: 0.18, shiftY: 0.08 },
-        };
-        const preset = presets[selectionExtent] || presets.hand;
+        const preset = { rx: 0.06, ry: 0.085, shiftY: 0 };
         const rx = Math.max(18, shortSide * preset.rx);
         const ry = Math.max(24, shortSide * preset.ry);
         const cy = pos.y + shortSide * preset.shiftY;
@@ -460,8 +461,11 @@ export default function GeneratorPage() {
         const maxDistance = Math.min(canvas.width, canvas.height) * 0.32;
         const hand = nearestHand(hands, pos, maxDistance);
         if (hand) {
-          points = handSelectionPolygon(hand, selectionExtent, canvas.width, canvas.height);
+          points = handSelectionPolygon(hand, 'hand', canvas.width, canvas.height);
           detected = points.length >= 3;
+          if (detected && hand.points?.[0]) {
+            connectionAnchorRef.current = { ...hand.points[0] };
+          }
         }
       } catch (error) {
         // ネットワーク/CSP/モデル読込失敗時は下のフォールバックへ進む。
@@ -471,6 +475,9 @@ export default function GeneratorPage() {
 
       if (!detected) {
         points = buildFallbackPoints();
+        // For fallback/manual-like selection we cannot know the wrist exactly; use the
+        // nearest edge point to the tap as a stable connection seed and let AI refine locally.
+        connectionAnchorRef.current = null;
       }
 
       if (hasSelection && lassoPointsRef.current.length > 0 && cutPieceBoundsRef.current) {
@@ -480,6 +487,8 @@ export default function GeneratorPage() {
           cutPieceBounds: { ...cutPieceBoundsRef.current },
           cutPieceRotation: cutPieceRotationRef.current,
           dragOffset: { ...dragOffsetRef.current },
+          connectionAnchor: connectionAnchorRef.current ? { ...connectionAnchorRef.current } : null,
+          connectionWidth: connectionWidthRef.current,
         });
       }
 
@@ -498,6 +507,8 @@ export default function GeneratorPage() {
         maxY = Math.max(maxY, p.y);
       });
       cutPieceBoundsRef.current = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+      if (!connectionAnchorRef.current) connectionAnchorRef.current = defaultConnectionAnchor(cutPieceBoundsRef.current);
+      connectionWidthRef.current = connectionWidthForBounds(cutPieceBoundsRef.current);
 
       const pieceCanvas = document.createElement('canvas');
       pieceCanvas.width = canvas.width;
@@ -519,7 +530,7 @@ export default function GeneratorPage() {
           : '手を認識できなかったため、タップ位置から候補範囲を作成しました'
       );
     },
-    [hasSelection, selectionExtent, setMode, showToast]
+    [hasSelection, setMode, showToast]
   );
 
   const handleStart = useCallback(
@@ -611,7 +622,9 @@ export default function GeneratorPage() {
         edit.cutPieceBounds,
         edit.dragOffset,
         edit.cutPieceRotation,
-        false
+        false,
+        edit.connectionAnchor,
+        edit.connectionWidth
       )
     );
     if (hasSelection) {
@@ -622,7 +635,9 @@ export default function GeneratorPage() {
         cutPieceBoundsRef.current,
         dragOffsetRef.current,
         cutPieceRotationRef.current,
-        false
+        false,
+        connectionAnchorRef.current,
+        connectionWidthRef.current
       );
     }
     return cCanvas;
@@ -1036,16 +1051,6 @@ Around the NEW location, redraw only the minimum seam/connection region necessar
           </button>
         </div>
 
-        <select
-          className="rounded border border-neutral-600 bg-neutral-900 px-2 py-2 text-xs text-white"
-          value={selectionExtent}
-          onChange={(e) => setSelectionExtent(e.target.value)}
-          title="自動選択を追加する際の選択粒度"
-        >
-          <option value="hand">手のみ</option>
-          <option value="hand_wrist">手＋手首</option>
-          <option value="hand_forearm">手＋前腕</option>
-        </select>
 
         <button
           className="btn border-sky-700"
@@ -1055,7 +1060,7 @@ Around the NEW location, redraw only the minimum seam/connection region necessar
             setAutoSelectHint('移動したい手の中央をタップ');
             showToast('移動したい手の中央を画像上でタップしてください');
           }}
-          title={`自動選択: ${selectionExtent}`}
+          title="手を自動選択"
         >
           🖐️ 手を自動選択
         </button>
