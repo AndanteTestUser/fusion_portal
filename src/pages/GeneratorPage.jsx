@@ -205,6 +205,7 @@ export default function GeneratorPage() {
   const [apiKeyInput, setApiKeyInput] = useState(geminiApiKey);
 
   const [currentMode, setCurrentModeState] = useState('lasso');
+  const [selectionExtent, setSelectionExtent] = useState('hand');
   const [hasSelection, setHasSelectionState] = useState(false);
   const [toast, setToast] = useState({ msg: '', visible: false });
   const [loading, setLoading] = useState({ visible: false, text: '処理中...' });
@@ -861,6 +862,10 @@ export default function GeneratorPage() {
   return (
     <div className="flex h-screen touch-none select-none flex-col overflow-hidden bg-neutral-900 text-white">
       <div className="z-10 flex flex-wrap items-center gap-2 bg-neutral-800 p-2 shadow-lg">
+        <div className="mr-1 flex flex-col leading-tight">
+          <span className="text-sm font-bold">Fusion Move</span>
+          <span className="text-[10px] text-neutral-400">選択 → 移動 → 接続補完</span>
+        </div>
         <input
           ref={fileInputRef}
           type="file"
@@ -879,7 +884,7 @@ export default function GeneratorPage() {
             }`}
             onClick={() => setMode('lasso')}
           >
-            🖍️ 選択
+            🖍️ 手動選択
           </button>
           <button
             className={`btn rounded-none ${currentMode === 'move' ? 'bg-sky-600 font-bold shadow-inner' : ''}`}
@@ -888,6 +893,25 @@ export default function GeneratorPage() {
             🖐️ 移動
           </button>
         </div>
+
+        <select
+          className="rounded border border-neutral-600 bg-neutral-900 px-2 py-2 text-xs text-white"
+          value={selectionExtent}
+          onChange={(e) => setSelectionExtent(e.target.value)}
+          title="自動選択を追加する際の選択粒度"
+        >
+          <option value="hand">手のみ</option>
+          <option value="hand_wrist">手＋手首</option>
+          <option value="hand_forearm">手＋前腕</option>
+        </select>
+
+        <button
+          className="btn border-sky-700"
+          onClick={() => showToast('手の自動選択は次段階で有効化します。現在は手動選択を使用してください')}
+          title={`自動選択: ${selectionExtent}`}
+        >
+          🖐️ 手を自動選択
+        </button>
 
         <button className="btn" onClick={handleUndo}>
           ↩️ 取消
@@ -990,7 +1014,7 @@ export default function GeneratorPage() {
                 </div>
               </div>
               <div className="flex min-w-[250px] flex-1 flex-col items-center gap-2.5 rounded-lg bg-neutral-700 p-3">
-                <h3 className="m-0 text-sm text-neutral-300">② 編集状態 (AI実行前)</h3>
+                <h3 className="m-0 text-sm text-neutral-300">② 移動・補完指定</h3>
                 <img
                   src={historyEdited || ''}
                   alt="未設定"
@@ -1018,7 +1042,7 @@ export default function GeneratorPage() {
 
             <div className="flex justify-center">
               <div className="flex w-full max-w-xl flex-col items-center gap-2.5 rounded-lg bg-neutral-700 p-3">
-                <h3 className="m-0 text-sm text-neutral-300">③ AI生成結果</h3>
+                <h3 className="m-0 text-sm text-neutral-300">③ Fusion Move 結果</h3>
                 <img
                   src={historyGenerated || ''}
                   alt="未設定"
