@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApiKeys } from '../context/ApiKeyContext.jsx';
 import { useWkAutoLoad } from '../hooks/useWkAutoLoad.js';
 import { detectHands, handSelectionPolygon, nearestHand } from '../lib/handSelection.js';
+import { connectionCorridorBounds, connectionWidthForBounds, defaultConnectionAnchor, transformPoint } from '../lib/moveConnection.js';
 
 // 元の index.html（vanilla JS 実装）のロジックをそのまま React に移植したもの。
 // キャンバス上の一時的な描画状態(座標・切り出し済みキャンバスなど)は再描画の
@@ -75,43 +76,6 @@ const fitWithinMaxDimension = (img) => {
   resizedCanvas.height = Math.max(1, Math.round(img.height * scale));
   resizedCanvas.getContext('2d').drawImage(img, 0, 0, resizedCanvas.width, resizedCanvas.height);
   return resizedCanvas;
-};
-
-// 移動・回転後にパーツが実際に配置されているバウンディングボックスを計算する。
-// drawPiece/drawPieceImageOnly と同じ変換(元の中心を軸に回転してからオフセットを加える)
-// を矩形の4隅に適用し、その外接矩形を返す。
-// 「穴」の元の位置だけでなく、パーツの新しい位置の繋ぎ目も信頼範囲に含めるために使う
-// (これがないと、パーツを大きく動かすほどAIが繋ぎ目を描き直しても
-// compositeTrustedRegionsOnly の段階で無条件に捨てられてしまう)。
-const computeMovedBounds = (bounds, offset, rotation) => {
-  const centerX = bounds.x + bounds.width / 2;
-  const centerY = bounds.y + bounds.height / 2;
-  const rad = (rotation * Math.PI) / 180;
-  const cos = Math.cos(rad);
-  const sin = Math.sin(rad);
-  const corners = [
-    { x: bounds.x, y: bounds.y },
-    { x: bounds.x + bounds.width, y: bounds.y },
-    { x: bounds.x, y: bounds.y + bounds.height },
-    { x: bounds.x + bounds.width, y: bounds.y + bounds.height },
-  ];
-
-  let minX = Infinity;
-  let minY = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-  corners.forEach((p) => {
-    const dx = p.x - centerX;
-    const dy = p.y - centerY;
-    const rx = centerX + dx * cos - dy * sin + offset.x;
-    const ry = centerY + dx * sin + dy * cos + offset.y;
-    minX = Math.min(minX, rx);
-    minY = Math.min(minY, ry);
-    maxX = Math.max(maxX, rx);
-    maxY = Math.max(maxY, ry);
-  });
-
-  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
 };
 
 // 穴(マスク色で塗った範囲)は必ずAIの出力で完全に置き換える。
@@ -206,7 +170,6 @@ export default function GeneratorPage() {
   const [apiKeyInput, setApiKeyInput] = useState(geminiApiKey);
 
   const [currentMode, setCurrentModeState] = useState('lasso');
-  const [selectionExtent, setSelectionExtent] = useState('hand');
   const [autoSelectHint, setAutoSelectHint] = useState(null);
   const [hasSelection, setHasSelectionState] = useState(false);
   const [toast, setToast] = useState({ msg: '', visible: false });
@@ -223,6 +186,8 @@ export default function GeneratorPage() {
   const cutPieceBoundsRef = useRef(null);
   const cutPieceRotationRef = useRef(0);
   const dragOffsetRef = useRef({ x: 0, y: 0 });
+  const connectionAnchorRef = useRef(null);
+  const connectionWidthRef = useRef(null);
   const isDrawingRef = useRef(false);
   const isDraggingRef = useRef(false);
   const lastPosRef = useRef({ x: 0, y: 0 });
@@ -237,7 +202,22 @@ export default function GeneratorPage() {
     setCurrentModeState(mode);
   }, []);
 
-  const drawPiece = useCallback((targetCtx, points, pieceCanvasLayer, bounds, offset, rotation, showFrame) => {
+  const drawConnectionCorridor = useCallback((targetCtx, bounds, offset, rotation, anchor, width) => {
+    if (!bounds || !anchor || !offset || (Math.abs(offset.x) < 0.5 && Math.abs(offset.y) < 0.5)) return;
+    const movedAnchor = transformPoint(anchor, bounds, offset, rotation);
+    targetCtx.save();
+    targetCtx.beginPath();
+    targetCtx.moveTo(anchor.x, anchor.y);
+    targetCtx.lineTo(movedAnchor.x, movedAnchor.y);
+    targetCtx.lineCap = 'round';
+    targetCtx.lineJoin = 'round';
+    targetCtx.lineWidth = Math.max(14, width || connectionWidthForBounds(bounds));
+    targetCtx.strokeStyle = MASK_COLOR;
+    targetCtx.stroke();
+    targetCtx.restore();
+  }, []);
+
+  const drawPiece = useCallback((targetCtx, points, pieceCanvasLayer, bounds, offset, rotation, showFrame, connectionAnchor, connectionWidth) => {
     if (!pieceCanvasLayer || !bounds || points.length === 0) return;
 
     targetCtx.save();
@@ -259,6 +239,10 @@ export default function GeneratorPage() {
     targetCtx.strokeStyle = MASK_COLOR;
     targetCtx.stroke();
 
+    // The connection corridor is an explicit geometry constraint: the AI must rebuild
+    // anatomy continuously from the original attachment point to the moved attachment point.
+    drawConnectionCorridor(targetCtx, bounds, offset, rotation, connectionAnchor, connectionWidth);
+
     const centerX = bounds.x + bounds.width / 2 + offset.x;
     const centerY = bounds.y + bounds.height / 2 + offset.y;
 
@@ -273,7 +257,7 @@ export default function GeneratorPage() {
       targetCtx.strokeRect(bounds.x + offset.x, bounds.y + offset.y, bounds.width, bounds.height);
     }
     targetCtx.restore();
-  }, []);
+  }, [drawConnectionCorridor]);
 
   // drawPiece からマスク塗り・選択枠を省き、移動後のパーツ画像だけを描くバージョン。
   // AIの生成結果に、ユーザーが配置した通りのピクセルをそのまま上書きするために使う
@@ -307,7 +291,9 @@ export default function GeneratorPage() {
         edit.cutPieceBounds,
         edit.dragOffset,
         edit.cutPieceRotation,
-        false
+        false,
+        edit.connectionAnchor,
+        edit.connectionWidth
       )
     );
 
@@ -319,7 +305,9 @@ export default function GeneratorPage() {
         cutPieceBoundsRef.current,
         dragOffsetRef.current,
         cutPieceRotationRef.current,
-        true
+        true,
+        connectionAnchorRef.current,
+        connectionWidthRef.current
       );
     }
 
@@ -348,6 +336,8 @@ export default function GeneratorPage() {
     cutPieceBoundsRef.current = null;
     cutPieceRotationRef.current = 0;
     dragOffsetRef.current = { x: 0, y: 0 };
+    connectionAnchorRef.current = null;
+    connectionWidthRef.current = null;
     setMode('lasso');
     renderCanvas();
   }, [renderCanvas, setMode]);
@@ -366,6 +356,8 @@ export default function GeneratorPage() {
       maxY = Math.max(maxY, p.y);
     });
     cutPieceBoundsRef.current = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+    connectionAnchorRef.current = defaultConnectionAnchor(cutPieceBoundsRef.current);
+    connectionWidthRef.current = connectionWidthForBounds(cutPieceBoundsRef.current);
 
     const pieceCanvas = document.createElement('canvas');
     pieceCanvas.width = canvas.width;
@@ -406,14 +398,23 @@ export default function GeneratorPage() {
 
       setAutoSelectHint(null);
 
+      if (hasSelection && lassoPointsRef.current.length > 0 && cutPieceBoundsRef.current) {
+        pastEditsRef.current.push({
+          lassoPoints: [...lassoPointsRef.current],
+          cutPieceCanvas: cutPieceCanvasRef.current,
+          cutPieceBounds: { ...cutPieceBoundsRef.current },
+          cutPieceRotation: cutPieceRotationRef.current,
+          dragOffset: { ...dragOffsetRef.current },
+          connectionAnchor: connectionAnchorRef.current ? { ...connectionAnchorRef.current } : null,
+          connectionWidth: connectionWidthRef.current,
+        });
+      }
+      connectionAnchorRef.current = null;
+      connectionWidthRef.current = null;
+
       const buildFallbackPoints = () => {
         const shortSide = Math.min(canvas.width, canvas.height);
-        const presets = {
-          hand: { rx: 0.055, ry: 0.075, shiftY: 0 },
-          hand_wrist: { rx: 0.065, ry: 0.11, shiftY: 0.025 },
-          hand_forearm: { rx: 0.08, ry: 0.18, shiftY: 0.08 },
-        };
-        const preset = presets[selectionExtent] || presets.hand;
+        const preset = { rx: 0.06, ry: 0.085, shiftY: 0 };
         const rx = Math.max(18, shortSide * preset.rx);
         const ry = Math.max(24, shortSide * preset.ry);
         const cy = pos.y + shortSide * preset.shiftY;
@@ -437,8 +438,11 @@ export default function GeneratorPage() {
         const maxDistance = Math.min(canvas.width, canvas.height) * 0.32;
         const hand = nearestHand(hands, pos, maxDistance);
         if (hand) {
-          points = handSelectionPolygon(hand, selectionExtent, canvas.width, canvas.height);
+          points = handSelectionPolygon(hand, 'hand', canvas.width, canvas.height);
           detected = points.length >= 3;
+          if (detected && hand.points?.[0]) {
+            connectionAnchorRef.current = { ...hand.points[0] };
+          }
         }
       } catch (error) {
         // ネットワーク/CSP/モデル読込失敗時は下のフォールバックへ進む。
@@ -448,16 +452,9 @@ export default function GeneratorPage() {
 
       if (!detected) {
         points = buildFallbackPoints();
-      }
-
-      if (hasSelection && lassoPointsRef.current.length > 0 && cutPieceBoundsRef.current) {
-        pastEditsRef.current.push({
-          lassoPoints: [...lassoPointsRef.current],
-          cutPieceCanvas: cutPieceCanvasRef.current,
-          cutPieceBounds: { ...cutPieceBoundsRef.current },
-          cutPieceRotation: cutPieceRotationRef.current,
-          dragOffset: { ...dragOffsetRef.current },
-        });
+        // For fallback/manual-like selection we cannot know the wrist exactly; use the
+        // nearest edge point to the tap as a stable connection seed and let AI refine locally.
+        connectionAnchorRef.current = null;
       }
 
       lassoPointsRef.current = points;
@@ -475,6 +472,8 @@ export default function GeneratorPage() {
         maxY = Math.max(maxY, p.y);
       });
       cutPieceBoundsRef.current = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+      if (!connectionAnchorRef.current) connectionAnchorRef.current = defaultConnectionAnchor(cutPieceBoundsRef.current);
+      connectionWidthRef.current = connectionWidthForBounds(cutPieceBoundsRef.current);
 
       const pieceCanvas = document.createElement('canvas');
       pieceCanvas.width = canvas.width;
@@ -496,7 +495,7 @@ export default function GeneratorPage() {
           : '手を認識できなかったため、タップ位置から候補範囲を作成しました'
       );
     },
-    [hasSelection, selectionExtent, setMode, showToast]
+    [hasSelection, setMode, showToast]
   );
 
   const handleStart = useCallback(
@@ -517,6 +516,8 @@ export default function GeneratorPage() {
             cutPieceBounds: { ...cutPieceBoundsRef.current },
             cutPieceRotation: cutPieceRotationRef.current,
             dragOffset: { ...dragOffsetRef.current },
+            connectionAnchor: connectionAnchorRef.current ? { ...connectionAnchorRef.current } : null,
+            connectionWidth: connectionWidthRef.current,
           });
         }
         lassoPointsRef.current = [pos];
@@ -526,6 +527,8 @@ export default function GeneratorPage() {
         cutPieceBoundsRef.current = null;
         cutPieceRotationRef.current = 0;
         dragOffsetRef.current = { x: 0, y: 0 };
+        connectionAnchorRef.current = null;
+        connectionWidthRef.current = null;
       } else if (currentMode === 'move' && hasSelection) {
         isDraggingRef.current = true;
         lastPosRef.current = pos;
@@ -573,6 +576,54 @@ export default function GeneratorPage() {
   // 現在の状態(元画像+配置済みパーツ+マスク色の穴)をそのまま描いたcanvasを返す。
   // AIへ送る画像であると同時に、生成後に「信頼範囲の外側」で使う土台にもなる
   // (=ユーザーが配置した通りのもの。AIの出力はまだ一切含まない)。
+  const drawConnectionGuide = useCallback((ctx, bounds, offset, rotation, anchor, width) => {
+    if (!bounds || !anchor || (Math.abs(offset.x) < 0.5 && Math.abs(offset.y) < 0.5)) return;
+    const movedAnchor = transformPoint(anchor, bounds, offset, rotation);
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(anchor.x, anchor.y);
+    ctx.lineTo(movedAnchor.x, movedAnchor.y);
+    ctx.lineCap = 'round';
+    ctx.lineWidth = Math.max(3, Math.min(10, (width || 24) * 0.14));
+    ctx.strokeStyle = '#00e5ff';
+    ctx.setLineDash([10, 8]);
+    ctx.stroke();
+    ctx.fillStyle = '#00e5ff';
+    ctx.beginPath();
+    ctx.arc(movedAnchor.x, movedAnchor.y, Math.max(4, ctx.lineWidth), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }, []);
+
+  const buildConnectionGuideCanvas = useCallback(() => {
+    const canvas = canvasRef.current;
+    const guide = document.createElement('canvas');
+    guide.width = canvas.width;
+    guide.height = canvas.height;
+    const ctx = guide.getContext('2d');
+    pastEditsRef.current.forEach((edit) =>
+      drawConnectionGuide(
+        ctx,
+        edit.cutPieceBounds,
+        edit.dragOffset,
+        edit.cutPieceRotation,
+        edit.connectionAnchor,
+        edit.connectionWidth
+      )
+    );
+    if (hasSelection) {
+      drawConnectionGuide(
+        ctx,
+        cutPieceBoundsRef.current,
+        dragOffsetRef.current,
+        cutPieceRotationRef.current,
+        connectionAnchorRef.current,
+        connectionWidthRef.current
+      );
+    }
+    return guide;
+  }, [drawConnectionGuide, hasSelection]);
+
   const buildCleanCanvas = useCallback(() => {
     const canvas = canvasRef.current;
     const cCanvas = document.createElement('canvas');
@@ -588,7 +639,9 @@ export default function GeneratorPage() {
         edit.cutPieceBounds,
         edit.dragOffset,
         edit.cutPieceRotation,
-        false
+        false,
+        edit.connectionAnchor,
+        edit.connectionWidth
       )
     );
     if (hasSelection) {
@@ -599,7 +652,9 @@ export default function GeneratorPage() {
         cutPieceBoundsRef.current,
         dragOffsetRef.current,
         cutPieceRotationRef.current,
-        false
+        false,
+        connectionAnchorRef.current,
+        connectionWidthRef.current
       );
     }
     return cCanvas;
@@ -614,16 +669,44 @@ export default function GeneratorPage() {
   // pastEdits と、現在ドラッグ中の選択パーツの両方が対象。
   // 新しい位置も含めないと、パーツを動かした先の繋ぎ目にAIの結果が一切反映されない。
   const collectMaskBounds = useCallback(() => {
+    const canvas = canvasRef.current;
     const bounds = [];
-    pastEditsRef.current.forEach((edit) => {
-      if (!edit.cutPieceBounds) return;
-      bounds.push(edit.cutPieceBounds);
-      bounds.push(computeMovedBounds(edit.cutPieceBounds, edit.dragOffset, edit.cutPieceRotation));
-    });
+    const addEditBounds = (editBounds, offset, rotation, anchor, width) => {
+      if (!editBounds) return;
+      bounds.push(editBounds);
+      if (anchor && canvas && (Math.abs(offset.x) >= 0.5 || Math.abs(offset.y) >= 0.5)) {
+        const movedAnchor = transformPoint(anchor, editBounds, offset, rotation);
+        // Trust only the corridor around the attachment path. The moved part itself is
+        // restored pixel-for-pixel after generation, so a broad moved-part rectangle would
+        // unnecessarily permit AI edits around unrelated nearby anatomy.
+        bounds.push(
+          connectionCorridorBounds(
+            anchor,
+            movedAnchor,
+            Math.max(14, width || connectionWidthForBounds(editBounds)),
+            canvas.width,
+            canvas.height
+          )
+        );
+      }
+    };
+
+    pastEditsRef.current.forEach((edit) =>
+      addEditBounds(
+        edit.cutPieceBounds,
+        edit.dragOffset,
+        edit.cutPieceRotation,
+        edit.connectionAnchor,
+        edit.connectionWidth
+      )
+    );
     if (hasSelection && cutPieceBoundsRef.current) {
-      bounds.push(cutPieceBoundsRef.current);
-      bounds.push(
-        computeMovedBounds(cutPieceBoundsRef.current, dragOffsetRef.current, cutPieceRotationRef.current)
+      addEditBounds(
+        cutPieceBoundsRef.current,
+        dragOffsetRef.current,
+        cutPieceRotationRef.current,
+        connectionAnchorRef.current,
+        connectionWidthRef.current
       );
     }
     return bounds;
@@ -800,6 +883,8 @@ export default function GeneratorPage() {
     // 「移動後のパーツは絶対」として扱うため、生成結果を受け取った後にこのレイヤーを
     // そのまま焼き込み直す。AIがパーツ自体を描き変えても最終的には上書きされる。
     const piecesLayer = buildPiecesOnlyLayer();
+    const connectionGuide = buildConnectionGuideCanvas();
+    const guideData = connectionGuide.toDataURL('image/png').split(',')[1];
 
     setLoading({ visible: true, text: '処理中...' });
 
@@ -814,9 +899,10 @@ export default function GeneratorPage() {
 
 Solid ${MASK_COLOR} (magenta) marks the VACATED SOURCE AREA where the moved part used to be. The moved part must NOT be reconstructed, duplicated, or echoed inside that source area. Inpaint only what would naturally be visible after the part has left: underlying body/background/garment surfaces and the minimum connecting anatomy needed to reach the moved part at its new location. Never create an extra copy of the moved hand, fingers, limb, object, or accessory at the old position.
 
-Around the NEW location, redraw only the minimum seam/connection region necessary to connect existing anatomy to the fixed moved part. Do not move any other body part. Do not change pose, composition, character count, limb count, clothing, accessories, camera angle, or unrelated shading/detail. Every magenta pixel must disappear. Keep the exact original art style and level of detail everywhere outside the source-hole and connection zones.`,
+The FIRST image is the edit canvas. The SECOND image is a transparent CONNECTION GUIDE: each cyan dashed line runs from an original attachment point to the exact moved attachment point, and the cyan dot marks the target attachment. Use the guide as geometry only; cyan must never appear in the output. The magenta CONNECTION CORRIDOR in the first image explicitly joins the same attachment points. Reconstruct one continuous, anatomically coherent connecting limb/segment through that corridor all the way to the moved part. Do not leave a gap, floating part, abrupt cutoff, or disconnected wrist/joint. Around the NEW location, redraw only the minimum seam/connection region necessary to connect existing anatomy to the fixed moved part. Do not move any other body part. Do not change pose, composition, character count, limb count, clothing, accessories, camera angle, or unrelated shading/detail. Every magenta pixel must disappear. Keep the exact original art style and level of detail everywhere outside the source-hole and connection zones.`,
             },
             { inlineData: { mimeType: 'image/jpeg', data: base64Data } },
+            { inlineData: { mimeType: 'image/png', data: guideData } },
           ],
         },
       ],
@@ -931,6 +1017,7 @@ Around the NEW location, redraw only the minimum seam/connection region necessar
     collectMaskBounds,
     measureMaskRemaining,
     buildPiecesOnlyLayer,
+    buildConnectionGuideCanvas,
   ]);
 
   const handleSave = useCallback(() => {
@@ -1013,16 +1100,6 @@ Around the NEW location, redraw only the minimum seam/connection region necessar
           </button>
         </div>
 
-        <select
-          className="rounded border border-neutral-600 bg-neutral-900 px-2 py-2 text-xs text-white"
-          value={selectionExtent}
-          onChange={(e) => setSelectionExtent(e.target.value)}
-          title="自動選択を追加する際の選択粒度"
-        >
-          <option value="hand">手のみ</option>
-          <option value="hand_wrist">手＋手首</option>
-          <option value="hand_forearm">手＋前腕</option>
-        </select>
 
         <button
           className="btn border-sky-700"
@@ -1032,7 +1109,7 @@ Around the NEW location, redraw only the minimum seam/connection region necessar
             setAutoSelectHint('移動したい手の中央をタップ');
             showToast('移動したい手の中央を画像上でタップしてください');
           }}
-          title={`自動選択: ${selectionExtent}`}
+          title="手を自動選択"
         >
           🖐️ 手を自動選択
         </button>
