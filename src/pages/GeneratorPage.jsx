@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApiKeys } from '../context/ApiKeyContext.jsx';
 import { useWkAutoLoad } from '../hooks/useWkAutoLoad.js';
+import { detectHands, handSelectionPolygon, nearestHand } from '../lib/handSelection.js';
 
 // 元の index.html（vanilla JS 実装）のロジックをそのまま React に移植したもの。
 // キャンバス上の一時的な描画状態(座標・切り出し済みキャンバスなど)は再描画の
@@ -205,6 +206,8 @@ export default function GeneratorPage() {
   const [apiKeyInput, setApiKeyInput] = useState(geminiApiKey);
 
   const [currentMode, setCurrentModeState] = useState('lasso');
+  const [selectionExtent, setSelectionExtent] = useState('hand');
+  const [autoSelectHint, setAutoSelectHint] = useState(null);
   const [hasSelection, setHasSelectionState] = useState(false);
   const [toast, setToast] = useState({ msg: '', visible: false });
   const [loading, setLoading] = useState({ visible: false, text: '処理中...' });
@@ -388,10 +391,123 @@ export default function GeneratorPage() {
     return { x: (clientX - rect.left) * scaleX, y: (clientY - rect.top) * scaleY };
   }, []);
 
+  // 手の自動選択:
+  // 1) MediaPipeで画像内の手ランドマークを検出
+  // 2) ユーザーがタップした位置に最も近い手を選ぶ
+  // 3) 手 / 手首 / 前腕の粒度に応じて選択ポリゴンを生成
+  // 4) 既存の cutPieceCanvas / cutPieceBounds に渡す
+  //
+  // 検出モデルを読み込めない環境では、編集自体を止めず、
+  // タップ位置中心の楕円候補へフォールバックする。
+  const createAutoHandSelection = useCallback(
+    async (pos) => {
+      const canvas = canvasRef.current;
+      if (!canvas || !originalImageRef.current) return;
+
+      setAutoSelectHint(null);
+
+      const buildFallbackPoints = () => {
+        const shortSide = Math.min(canvas.width, canvas.height);
+        const presets = {
+          hand: { rx: 0.055, ry: 0.075, shiftY: 0 },
+          hand_wrist: { rx: 0.065, ry: 0.11, shiftY: 0.025 },
+          hand_forearm: { rx: 0.08, ry: 0.18, shiftY: 0.08 },
+        };
+        const preset = presets[selectionExtent] || presets.hand;
+        const rx = Math.max(18, shortSide * preset.rx);
+        const ry = Math.max(24, shortSide * preset.ry);
+        const cy = pos.y + shortSide * preset.shiftY;
+        return Array.from({ length: 40 }, (_, i) => {
+          const angle = (Math.PI * 2 * i) / 40;
+          return {
+            x: Math.max(0, Math.min(canvas.width, pos.x + Math.cos(angle) * rx)),
+            y: Math.max(0, Math.min(canvas.height, cy + Math.sin(angle) * ry)),
+          };
+        });
+      };
+
+      let points = [];
+      let detected = false;
+      setLoading({ visible: true, text: '手を検出中...' });
+
+      try {
+        // 表示中のcanvasをそのまま解析することで、WK画像・過去の編集結果など
+        // 現在ユーザーが見ている状態に対して手を検出する。
+        const hands = await detectHands(canvas, canvas.width, canvas.height);
+        const maxDistance = Math.min(canvas.width, canvas.height) * 0.32;
+        const hand = nearestHand(hands, pos, maxDistance);
+        if (hand) {
+          points = handSelectionPolygon(hand, selectionExtent, canvas.width, canvas.height);
+          detected = points.length >= 3;
+        }
+      } catch (error) {
+        // ネットワーク/CSP/モデル読込失敗時は下のフォールバックへ進む。
+      } finally {
+        setLoading({ visible: false, text: '処理中...' });
+      }
+
+      if (!detected) {
+        points = buildFallbackPoints();
+      }
+
+      if (hasSelection && lassoPointsRef.current.length > 0 && cutPieceBoundsRef.current) {
+        pastEditsRef.current.push({
+          lassoPoints: [...lassoPointsRef.current],
+          cutPieceCanvas: cutPieceCanvasRef.current,
+          cutPieceBounds: { ...cutPieceBoundsRef.current },
+          cutPieceRotation: cutPieceRotationRef.current,
+          dragOffset: { ...dragOffsetRef.current },
+        });
+      }
+
+      lassoPointsRef.current = points;
+      cutPieceRotationRef.current = 0;
+      dragOffsetRef.current = { x: 0, y: 0 };
+
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      points.forEach((p) => {
+        minX = Math.min(minX, p.x);
+        minY = Math.min(minY, p.y);
+        maxX = Math.max(maxX, p.x);
+        maxY = Math.max(maxY, p.y);
+      });
+      cutPieceBoundsRef.current = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+
+      const pieceCanvas = document.createElement('canvas');
+      pieceCanvas.width = canvas.width;
+      pieceCanvas.height = canvas.height;
+      const pCtx = pieceCanvas.getContext('2d');
+      pCtx.beginPath();
+      pCtx.moveTo(points[0].x, points[0].y);
+      for (let i = 1; i < points.length; i++) pCtx.lineTo(points[i].x, points[i].y);
+      pCtx.closePath();
+      pCtx.clip();
+      pCtx.drawImage(originalImageRef.current, 0, 0);
+      cutPieceCanvasRef.current = pieceCanvas;
+
+      setHasSelectionState(true);
+      setMode('move');
+      showToast(
+        detected
+          ? '手を認識して選択しました。ドラッグで移動できます'
+          : '手を認識できなかったため、タップ位置から候補範囲を作成しました'
+      );
+    },
+    [hasSelection, selectionExtent, setMode, showToast]
+  );
+
   const handleStart = useCallback(
     (e) => {
       if (!originalImageRef.current) return;
       const pos = getCanvasPos(e);
+
+      if (currentMode === 'auto-hand') {
+        createAutoHandSelection(pos);
+        return;
+      }
 
       if (currentMode === 'lasso') {
         if (hasSelection && lassoPointsRef.current.length > 0) {
@@ -415,7 +531,7 @@ export default function GeneratorPage() {
         lastPosRef.current = pos;
       }
     },
-    [currentMode, hasSelection, getCanvasPos]
+    [currentMode, hasSelection, getCanvasPos, createAutoHandSelection]
   );
 
   const handleMove = useCallback(
@@ -694,7 +810,11 @@ export default function GeneratorPage() {
           role: 'user',
           parts: [
             {
-              text: `This is an edited collage image where a body part was repositioned to a new location. Treat the repositioned part's new position, pose, and pixels as FIXED and ABSOLUTE — do not redraw, reshape, or reinterpret the moved part itself. Instead, redraw only the small area immediately AROUND it (the connecting anatomy such as the arm or joint leading into it) so that it naturally connects to the moved part in its new position. Areas filled with solid ${MASK_COLOR} (magenta) are placeholder masks marking missing image data, not an intended color — they must not remain in the output; seamlessly inpaint every masked area and any awkward seams or gaps around the moved part. Do NOT add, remove, or change anything else in the image: no new objects, accessories, jewelry, or clothing that were not already there, and no changes to existing skin texture, shading, wrinkles, creases, or shadows anywhere outside the masked/seam area. Keep the exact original art style and level of detail everywhere else, without altering the overall character design or composition.`,
+              text: `This is a MOVE operation, not a general redraw. A body part has already been cut from its original location and placed at a new location. The moved part's new position, pose, appearance, and pixels are FIXED and ABSOLUTE — never redraw, reshape, replace, or reinterpret that moved part.
+
+Solid ${MASK_COLOR} (magenta) marks the VACATED SOURCE AREA where the moved part used to be. The moved part must NOT be reconstructed, duplicated, or echoed inside that source area. Inpaint only what would naturally be visible after the part has left: underlying body/background/garment surfaces and the minimum connecting anatomy needed to reach the moved part at its new location. Never create an extra copy of the moved hand, fingers, limb, object, or accessory at the old position.
+
+Around the NEW location, redraw only the minimum seam/connection region necessary to connect existing anatomy to the fixed moved part. Do not move any other body part. Do not change pose, composition, character count, limb count, clothing, accessories, camera angle, or unrelated shading/detail. Every magenta pixel must disappear. Keep the exact original art style and level of detail everywhere outside the source-hole and connection zones.`,
             },
             { inlineData: { mimeType: 'image/jpeg', data: base64Data } },
           ],
@@ -861,6 +981,10 @@ export default function GeneratorPage() {
   return (
     <div className="flex h-screen touch-none select-none flex-col overflow-hidden bg-neutral-900 text-white">
       <div className="z-10 flex flex-wrap items-center gap-2 bg-neutral-800 p-2 shadow-lg">
+        <div className="mr-1 flex flex-col leading-tight">
+          <span className="text-sm font-bold">Fusion Move</span>
+          <span className="text-[10px] text-neutral-400">選択 → 移動 → 接続補完</span>
+        </div>
         <input
           ref={fileInputRef}
           type="file"
@@ -879,7 +1003,7 @@ export default function GeneratorPage() {
             }`}
             onClick={() => setMode('lasso')}
           >
-            🖍️ 選択
+            🖍️ 手動選択
           </button>
           <button
             className={`btn rounded-none ${currentMode === 'move' ? 'bg-sky-600 font-bold shadow-inner' : ''}`}
@@ -888,6 +1012,30 @@ export default function GeneratorPage() {
             🖐️ 移動
           </button>
         </div>
+
+        <select
+          className="rounded border border-neutral-600 bg-neutral-900 px-2 py-2 text-xs text-white"
+          value={selectionExtent}
+          onChange={(e) => setSelectionExtent(e.target.value)}
+          title="自動選択を追加する際の選択粒度"
+        >
+          <option value="hand">手のみ</option>
+          <option value="hand_wrist">手＋手首</option>
+          <option value="hand_forearm">手＋前腕</option>
+        </select>
+
+        <button
+          className="btn border-sky-700"
+          onClick={() => {
+            if (!originalImageRef.current) return showToast('先に画像を読み込んでください');
+            setMode('auto-hand');
+            setAutoSelectHint('移動したい手の中央をタップ');
+            showToast('移動したい手の中央を画像上でタップしてください');
+          }}
+          title={`自動選択: ${selectionExtent}`}
+        >
+          🖐️ 手を自動選択
+        </button>
 
         <button className="btn" onClick={handleUndo}>
           ↩️ 取消
@@ -923,6 +1071,11 @@ export default function GeneratorPage() {
       </div>
 
       <div className="relative flex flex-grow items-center justify-center overflow-hidden bg-black">
+        {autoSelectHint && (
+          <div className="pointer-events-none absolute left-1/2 top-3 z-20 -translate-x-1/2 rounded-full bg-sky-600/90 px-4 py-2 text-xs font-bold shadow-lg">
+            🖐️ {autoSelectHint}
+          </div>
+        )}
         <canvas
           ref={canvasRef}
           className="max-h-full max-w-full touch-none object-contain"
@@ -990,7 +1143,7 @@ export default function GeneratorPage() {
                 </div>
               </div>
               <div className="flex min-w-[250px] flex-1 flex-col items-center gap-2.5 rounded-lg bg-neutral-700 p-3">
-                <h3 className="m-0 text-sm text-neutral-300">② 編集状態 (AI実行前)</h3>
+                <h3 className="m-0 text-sm text-neutral-300">② 移動・補完指定</h3>
                 <img
                   src={historyEdited || ''}
                   alt="未設定"
@@ -1018,7 +1171,7 @@ export default function GeneratorPage() {
 
             <div className="flex justify-center">
               <div className="flex w-full max-w-xl flex-col items-center gap-2.5 rounded-lg bg-neutral-700 p-3">
-                <h3 className="m-0 text-sm text-neutral-300">③ AI生成結果</h3>
+                <h3 className="m-0 text-sm text-neutral-300">③ Fusion Move 結果</h3>
                 <img
                   src={historyGenerated || ''}
                   alt="未設定"
